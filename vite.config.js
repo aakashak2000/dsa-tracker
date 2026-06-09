@@ -8,7 +8,16 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:3001',
-        changeOrigin: true
+        changeOrigin: true,
+        timeout: 0,
+        proxyTimeout: 0,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            if (req.url.includes('detailed-report')) {
+              proxyReq.setHeader('Connection', 'keep-alive')
+            }
+          })
+        }
       }
     }
   }
