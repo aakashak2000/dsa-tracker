@@ -4,8 +4,9 @@ import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend
 } from 'recharts'
-import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink } from 'lucide-react'
+import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink, FileBarChart } from 'lucide-react'
 import axios from 'axios'
+import ReportModal from './ReportModal.jsx'
 
 function SkeletonCard() {
   return <div className="skeleton h-24 rounded-2xl" />
@@ -74,6 +75,7 @@ export default function Dashboard() {
   const [data, setData] = useState(null)
   const [dueProblems, setDueProblems] = useState([])
   const [loading, setLoading] = useState(true)
+  const [showReport, setShowReport] = useState(false)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -121,7 +123,16 @@ export default function Dashboard() {
             {data?.motivational || 'Loading your progress…'}
           </p>
         </div>
-        <div className="text-xs text-gray-600">{new Date().toLocaleDateString('en', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-gray-600">{new Date().toLocaleDateString('en', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+          <button
+            onClick={() => setShowReport(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-white text-sm font-medium rounded-xl transition-all"
+          >
+            <FileBarChart size={15} />
+            Get Report
+          </button>
+        </div>
       </div>
 
       {/* KPI Cards */}
@@ -307,6 +318,8 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {showReport && <ReportModal onClose={() => setShowReport(false)} />}
 
       {/* Badges */}
       {!loading && data?.badges?.length > 0 && (

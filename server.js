@@ -583,6 +583,132 @@ app.get('/api/user', (req, res) => {
   })
 })
 
+// GET /api/report
+app.get('/api/report', (req, res) => {
+  const db = getDB()
+  const problems = db.problems
+  const todayStr = today()
+
+  const sevenDaysAgo = new Date()
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
+  const sevenDaysAgoStr = sevenDaysAgo.toISOString().split('T')[0]
+
+  // 1. Overdue problems (sorted by most overdue first)
+  const overdue = problems
+    .filter(p => p.nextReviewDate && p.nextReviewDate < todayStr)
+    .sort((a, b) => a.nextReviewDate.localeCompare(b.nextReviewDate))
+    .slice(0, 5)
+    .map(p => ({ name: p.name, topic: p.topic, dueDate: p.nextReviewDate, link: p.link }))
+
+  const dueTodayCount = problems.filter(p => p.nextReviewDate && p.nextReviewDate <= todayStr).length
+
+  // 2. Weakest sub-topics by avg ease factor (only those with at least 1 attempt)
+  const subTopicMap = {}
+  for (const p of problems) {
+    if (p.repetitions === 0) continue
+    const key = `${p.topic} › ${p.subTopic}`
+    if (!subTopicMap[key]) subTopicMap[key] = { total: 0, efSum: 0, problems: [] }
+    subTopicMap[key].total++
+    subTopicMap[key].efSum += p.easeFactor
+    subTopicMap[key].problems.push(p)
+  }
+  const weakSubTopics = Object.entries(subTopicMap)
+    .map(([key, v]) => ({ key, avgEF: v.efSum / v.total, count: v.total }))
+    .filter(s => s.avgEF < 2.5)
+    .sort((a, b) => a.avgEF - b.avgEF)
+    .slice(0, 4)
+
+  // 3. Recent struggles (Again/Hard in last 7 days)
+  const recentStruggles = problems
+    .filter(p => p.attempts.some(a => a.date >= sevenDaysAgoStr && (a.rating === 1 || a.rating === 2)))
+    .map(p => {
+      const worstAttempt = p.attempts
+        .filter(a => a.date >= sevenDaysAgoStr && (a.rating === 1 || a.rating === 2))
+        .sort((a, b) => a.rating - b.rating)[0]
+      return { name: p.name, topic: p.topic, rating: worstAttempt.rating, link: p.link }
+    })
+    .slice(0, 5)
+
+  // 4. Untouched topics (0 attempts)
+  const topics = [...new Set(problems.map(p => p.topic))]
+  const untouchedTopics = topics.filter(t => {
+    const tp = problems.filter(p => p.topic === t)
+    return tp.every(p => p.repetitions === 0)
+  })
+
+  // 5. Top 3 recommended problems (lowest EF, already attempted, not solved cleanly)
+  const recommended = problems
+    .filter(p => p.repetitions > 0 && p.status !== 'solved')
+    .sort((a, b) => a.easeFactor - b.easeFactor)
+    .slice(0, 3)
+    .map(p => ({ name: p.name, topic: p.topic, ef: p.easeFactor.toFixed(2), link: p.link, difficulty: p.difficulty }))
+
+  // 6. Velocity: problems solved this week vs last week
+  const lastWeekStart = new Date(); lastWeekStart.setDate(lastWeekStart.getDate() - 14)
+  const lastWeekEnd = new Date(); lastWeekEnd.setDate(lastWeekEnd.getDate() - 7)
+  const thisWeekStart = new Date(); thisWeekStart.setDate(thisWeekStart.getDate() - 7)
+
+  const solvedThisWeek = problems.filter(p =>
+    p.attempts.some(a => a.status === 'solved' && a.date >= thisWeekStart.toISOString().split('T')[0])
+  ).length
+  const solvedLastWeek = problems.filter(p =>
+    p.attempts.some(a => a.status === 'solved' &&
+      a.date >= lastWeekStart.toISOString().split('T')[0] &&
+      a.date < lastWeekEnd.toISOString().split('T')[0])
+  ).length
+
+  // 7. Notes insights — topics where notes mention struggle keywords
+  const struggleKeywords = ['stuck', 'forgot', 'confused', 'hard', 'didn\'t', 'wrong', 'fail']
+  const noteInsights = []
+  const topicNoteStruggles = {}
+  for (const p of problems) {
+    for (const n of (p.noteEntries || [])) {
+      const text = n.text.toLowerCase()
+      if (struggleKeywords.some(k => text.includes(k))) {
+        topicNoteStruggles[p.topic] = (topicNoteStruggles[p.topic] || 0) + 1
+      }
+    }
+  }
+  const noteWeakTopics = Object.entries(topicNoteStruggles)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+
+  // 8. Overall health score (0-100)
+  const solved = problems.filter(p => p.status === 'solved').length
+  const pctDone = Math.round((solved / problems.length) * 100)
+  const overdueRatio = dueTodayCount > 0 ? Math.min(overdue.length / dueTodayCount, 1) : 0
+  const avgEFAll = problems.filter(p => p.repetitions > 0).length > 0
+    ? problems.filter(p => p.repetitions > 0).reduce((s, p) => s + p.easeFactor, 0) /
+      problems.filter(p => p.repetitions > 0).length
+    : 2.5
+  const healthScore = Math.round(
+    (pctDone * 0.4) + (Math.min(db.user.currentStreak || 0, 30) / 30 * 30) +
+    ((avgEFAll / 2.5) * 20) + ((1 - overdueRatio) * 10)
+  )
+
+  res.json({
+    generatedAt: todayStr,
+    overview: {
+      solved,
+      total: problems.length,
+      pctDone,
+      streak: db.user.currentStreak || 0,
+      xp: db.user.xp || 0,
+      level: levelFromXP(db.user.xp || 0).name,
+      healthScore: Math.min(healthScore, 100),
+      solvedThisWeek,
+      solvedLastWeek
+    },
+    overdue,
+    dueTodayCount,
+    weakSubTopics,
+    recentStruggles,
+    untouchedTopics,
+    recommended,
+    noteWeakTopics
+  })
+})
+
 const PORT = 3001
 app.listen(PORT, () => {
   console.log(`DSA Tracker API running on http://localhost:${PORT}`)
