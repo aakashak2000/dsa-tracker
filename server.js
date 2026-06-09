@@ -5,6 +5,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { parse } from 'csv-parse/sync'
 import Anthropic from '@anthropic-ai/sdk'
+import OpenAI from 'openai'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -711,6 +712,14 @@ app.get('/api/report', (req, res) => {
   })
 })
 
+// GET /api/ai-providers — which keys are configured
+app.get('/api/ai-providers', (req, res) => {
+  res.json({
+    anthropic: !!process.env.ANTHROPIC_API_KEY,
+    openai: !!process.env.OPENAI_API_KEY
+  })
+})
+
 // GET /api/detailed-report  (SSE streaming)
 app.get('/api/detailed-report', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream')
@@ -720,9 +729,17 @@ app.get('/api/detailed-report', async (req, res) => {
 
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
 
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) {
-    send({ type: 'error', code: 'no_api_key' })
+  const provider = req.query.provider || 'anthropic'
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+  const openaiKey = process.env.OPENAI_API_KEY
+
+  if (provider === 'anthropic' && !anthropicKey) {
+    send({ type: 'error', code: 'no_api_key', provider: 'anthropic' })
+    res.end()
+    return
+  }
+  if (provider === 'openai' && !openaiKey) {
+    send({ type: 'error', code: 'no_api_key', provider: 'openai' })
     res.end()
     return
   }
@@ -736,7 +753,6 @@ app.get('/api/detailed-report', async (req, res) => {
     fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14)
     const cutoff = fourteenDaysAgo.toISOString().split('T')[0]
 
-    // Build topic stats
     const topics = [...new Set(problems.map(p => p.topic))]
     const topicStats = topics.map(topic => {
       const tp = problems.filter(p => p.topic === topic)
@@ -745,19 +761,17 @@ app.get('/api/detailed-report', async (req, res) => {
       const avgEF = attempted.length
         ? (attempted.reduce((s, p) => s + p.easeFactor, 0) / attempted.length).toFixed(2)
         : null
-      const subTopics = [...new Set(tp.map(p => p.subTopic))]
       return {
         topic,
         total: tp.length,
         solved,
         pct: Math.round((solved / tp.length) * 100),
         avgEF,
-        subTopics,
+        subTopics: [...new Set(tp.map(p => p.subTopic))],
         attempted: attempted.length
       }
     }).filter(t => t.attempted > 0 || t.solved > 0)
 
-    // Collect problems with notes
     const problemsWithNotes = problems
       .filter(p => p.noteEntries?.length > 0)
       .map(p => ({
@@ -770,12 +784,10 @@ app.get('/api/detailed-report', async (req, res) => {
         notes: p.noteEntries.slice(-3).map(n => `[${n.date}] ${n.text}`).join(' | ')
       }))
 
-    // Recent struggles
     const recentStruggles = problems
       .filter(p => p.attempts.some(a => a.date >= cutoff && (a.rating === 1 || a.rating === 2)))
       .map(p => ({ name: p.name, topic: p.topic, ef: p.easeFactor.toFixed(2) }))
 
-    // Overdue
     const overdue = problems
       .filter(p => p.nextReviewDate && p.nextReviewDate < todayStr)
       .map(p => p.name)
@@ -784,49 +796,58 @@ app.get('/api/detailed-report', async (req, res) => {
 
     const contextData = {
       overview: {
-        solved,
-        total: problems.length,
+        solved, total: problems.length,
         pct: Math.round((solved / problems.length) * 100),
         streak: db.user.currentStreak || 0,
         level: levelFromXP(db.user.xp || 0).name
       },
-      topicStats,
-      problemsWithNotes,
-      recentStruggles,
-      overdueCount: overdue.length,
-      overdueNames: overdue.slice(0, 10)
+      topicStats, problemsWithNotes, recentStruggles,
+      overdueCount: overdue.length, overdueNames: overdue.slice(0, 10)
     }
 
-    const userDataText = JSON.stringify(contextData, null, 2)
-
-    const systemPrompt = `You are an expert DSA coach analyzing a student's practice journal. Your job is to give them a brutally honest, specific, and actionable improvement plan based on their actual progress data and personal notes.
+    const systemPrompt = `You are an expert DSA coach analyzing a student's practice journal. Give a brutally honest, specific, actionable improvement plan based on their progress data and notes.
 
 Output format (strict markdown):
-- Use ## for each topic/section header
-- Under each section: 2-3 sentence diagnosis, then a bulleted todo list with - [ ] checkboxes
-- End with a ## Priority This Week section with the top 5 most important todos across all sections
-- Be specific — reference actual problem names, sub-topics, and patterns from their notes
-- Tone: direct, like a senior engineer doing a code review, not a cheerleader`
+- ## heading per topic/section
+- Under each: 2-3 sentence diagnosis, then - [ ] checkbox todos
+- End with ## Priority This Week (top 5 todos across all sections)
+- Reference actual problem names and patterns from their notes
+- Tone: direct, like a senior engineer doing a code review`
 
-    const userPrompt = `Here is my complete DSA practice data. Analyze my notes and performance to generate a detailed, section-by-section action plan with specific todos for each topic I need to work on.
+    const userPrompt = `Here is my DSA practice data. Generate a detailed section-by-section action plan with specific todos based on what my notes reveal.
 
-${userDataText}
+${JSON.stringify(contextData, null, 2)}
 
-Give me the report now. Be specific about what my notes reveal. Name actual problems I need to revisit. Tell me exactly what to do.`
+Be specific. Name actual problems. Tell me exactly what to do next.`
 
-    const client = new Anthropic({ apiKey })
-
-    const stream = client.messages.stream({
-      model: 'claude-opus-4-6',
-      max_tokens: 8000,
-      thinking: { type: 'adaptive' },
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }]
-    })
-
-    for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        send({ type: 'text', text: event.delta.text })
+    if (provider === 'openai') {
+      const client = new OpenAI({ apiKey: openaiKey })
+      const stream = await client.chat.completions.create({
+        model: 'gpt-4o',
+        max_tokens: 8000,
+        stream: true,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+      for await (const chunk of stream) {
+        const text = chunk.choices[0]?.delta?.content
+        if (text) send({ type: 'text', text })
+      }
+    } else {
+      const client = new Anthropic({ apiKey: anthropicKey })
+      const stream = client.messages.stream({
+        model: 'claude-opus-4-6',
+        max_tokens: 8000,
+        thinking: { type: 'adaptive' },
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }]
+      })
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          send({ type: 'text', text: event.delta.text })
+        }
       }
     }
 
