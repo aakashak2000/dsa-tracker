@@ -726,9 +726,13 @@ app.get('/api/detailed-report', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
   res.flushHeaders()
 
-  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
+  const send = (obj) => {
+    res.write(`data: ${JSON.stringify(obj)}\n\n`)
+    if (typeof res.flush === 'function') res.flush()
+  }
 
   const provider = req.query.provider || 'anthropic'
   const anthropicKey = process.env.ANTHROPIC_API_KEY
