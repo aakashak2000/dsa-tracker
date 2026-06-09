@@ -1,8 +1,10 @@
+import 'dotenv/config'
 import express from 'express'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { parse } from 'csv-parse/sync'
+import Anthropic from '@anthropic-ai/sdk'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -707,6 +709,134 @@ app.get('/api/report', (req, res) => {
     recommended,
     noteWeakTopics
   })
+})
+
+// GET /api/detailed-report  (SSE streaming)
+app.get('/api/detailed-report', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders()
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
+
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) {
+    send({ type: 'error', code: 'no_api_key' })
+    res.end()
+    return
+  }
+
+  try {
+    const db = getDB()
+    const problems = db.problems
+    const todayStr = today()
+
+    const fourteenDaysAgo = new Date()
+    fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14)
+    const cutoff = fourteenDaysAgo.toISOString().split('T')[0]
+
+    // Build topic stats
+    const topics = [...new Set(problems.map(p => p.topic))]
+    const topicStats = topics.map(topic => {
+      const tp = problems.filter(p => p.topic === topic)
+      const solved = tp.filter(p => p.status === 'solved').length
+      const attempted = tp.filter(p => p.repetitions > 0)
+      const avgEF = attempted.length
+        ? (attempted.reduce((s, p) => s + p.easeFactor, 0) / attempted.length).toFixed(2)
+        : null
+      const subTopics = [...new Set(tp.map(p => p.subTopic))]
+      return {
+        topic,
+        total: tp.length,
+        solved,
+        pct: Math.round((solved / tp.length) * 100),
+        avgEF,
+        subTopics,
+        attempted: attempted.length
+      }
+    }).filter(t => t.attempted > 0 || t.solved > 0)
+
+    // Collect problems with notes
+    const problemsWithNotes = problems
+      .filter(p => p.noteEntries?.length > 0)
+      .map(p => ({
+        name: p.name,
+        topic: p.topic,
+        subTopic: p.subTopic,
+        difficulty: p.difficulty,
+        status: p.status,
+        ef: p.easeFactor.toFixed(2),
+        notes: p.noteEntries.slice(-3).map(n => `[${n.date}] ${n.text}`).join(' | ')
+      }))
+
+    // Recent struggles
+    const recentStruggles = problems
+      .filter(p => p.attempts.some(a => a.date >= cutoff && (a.rating === 1 || a.rating === 2)))
+      .map(p => ({ name: p.name, topic: p.topic, ef: p.easeFactor.toFixed(2) }))
+
+    // Overdue
+    const overdue = problems
+      .filter(p => p.nextReviewDate && p.nextReviewDate < todayStr)
+      .map(p => p.name)
+
+    const solved = problems.filter(p => p.status === 'solved').length
+
+    const contextData = {
+      overview: {
+        solved,
+        total: problems.length,
+        pct: Math.round((solved / problems.length) * 100),
+        streak: db.user.currentStreak || 0,
+        level: levelFromXP(db.user.xp || 0).name
+      },
+      topicStats,
+      problemsWithNotes,
+      recentStruggles,
+      overdueCount: overdue.length,
+      overdueNames: overdue.slice(0, 10)
+    }
+
+    const userDataText = JSON.stringify(contextData, null, 2)
+
+    const systemPrompt = `You are an expert DSA coach analyzing a student's practice journal. Your job is to give them a brutally honest, specific, and actionable improvement plan based on their actual progress data and personal notes.
+
+Output format (strict markdown):
+- Use ## for each topic/section header
+- Under each section: 2-3 sentence diagnosis, then a bulleted todo list with - [ ] checkboxes
+- End with a ## Priority This Week section with the top 5 most important todos across all sections
+- Be specific — reference actual problem names, sub-topics, and patterns from their notes
+- Tone: direct, like a senior engineer doing a code review, not a cheerleader`
+
+    const userPrompt = `Here is my complete DSA practice data. Analyze my notes and performance to generate a detailed, section-by-section action plan with specific todos for each topic I need to work on.
+
+${userDataText}
+
+Give me the report now. Be specific about what my notes reveal. Name actual problems I need to revisit. Tell me exactly what to do.`
+
+    const client = new Anthropic({ apiKey })
+
+    const stream = client.messages.stream({
+      model: 'claude-opus-4-6',
+      max_tokens: 8000,
+      thinking: { type: 'adaptive' },
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    })
+
+    for await (const event of stream) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        send({ type: 'text', text: event.delta.text })
+      }
+    }
+
+    send({ type: 'done' })
+    res.end()
+  } catch (err) {
+    console.error('Detailed report error:', err)
+    send({ type: 'error', code: 'api_error', message: err.message })
+    res.end()
+  }
 })
 
 const PORT = 3001

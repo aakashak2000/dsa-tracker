@@ -4,9 +4,10 @@ import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend
 } from 'recharts'
-import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink, FileBarChart } from 'lucide-react'
+import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink, FileBarChart, BrainCircuit } from 'lucide-react'
 import axios from 'axios'
 import ReportModal from './ReportModal.jsx'
+import DetailedReportModal from './DetailedReportModal.jsx'
 
 function SkeletonCard() {
   return <div className="skeleton h-24 rounded-2xl" />
@@ -76,6 +77,7 @@ export default function Dashboard() {
   const [dueProblems, setDueProblems] = useState([])
   const [loading, setLoading] = useState(true)
   const [showReport, setShowReport] = useState(false)
+  const [showDetailedReport, setShowDetailedReport] = useState(false)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -131,6 +133,13 @@ export default function Dashboard() {
           >
             <FileBarChart size={15} />
             Get Report
+          </button>
+          <button
+            onClick={() => setShowDetailedReport(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-brand-700 hover:bg-brand-600 border border-brand-600 text-white text-sm font-medium rounded-xl transition-all"
+          >
+            <BrainCircuit size={15} />
+            Detailed Report
           </button>
         </div>
       </div>
@@ -320,6 +329,7 @@ export default function Dashboard() {
       </div>
 
       {showReport && <ReportModal onClose={() => setShowReport(false)} />}
+      {showDetailedReport && <DetailedReportModal onClose={() => setShowDetailedReport(false)} />}
 
       {/* Badges */}
       {!loading && data?.badges?.length > 0 && (
