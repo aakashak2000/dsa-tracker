@@ -11,6 +11,13 @@ import OpenAI from 'openai'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
 app.use(express.json())
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3000')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  if (req.method === 'OPTIONS') return res.sendStatus(204)
+  next()
+})
 
 const DB_PATH = path.join(__dirname, '..', 'db.json')
 const CSV_PATH = path.join(__dirname, '..', 'master_dsa_sheet.csv')
@@ -38,9 +45,10 @@ function sm2Update(problem, quality) {
     repetitions = 0
     interval = 1
   } else {
-    if (repetitions === 0) interval = 1
-    else if (repetitions === 1) interval = 3
-    else interval = Math.round(interval * easeFactor)
+    // Easy bonus: trivial problems shouldn't come back tomorrow
+    if (repetitions === 0) interval = quality === 5 ? 4 : 1
+    else if (repetitions === 1) interval = quality === 5 ? 7 : 3
+    else interval = Math.round(interval * easeFactor * (quality === 5 ? 1.3 : 1))
     repetitions += 1
   }
 
@@ -310,6 +318,69 @@ app.get('/api/due-today', (req, res) => {
   res.json(due)
 })
 
+// GET /api/start-today — auto-built session: recall (due reviews) + fresh problems, every day
+app.get('/api/start-today', (req, res) => {
+  const db = getDB()
+  const todayStr = today()
+  const SESSION_SIZE = 10
+  const MAX_DUE = 6 // always leave room for new material — recall + new mix
+
+  // Due reviews: most overdue first, lowest EF breaks ties
+  const due = db.problems
+    .filter(p => p.nextReviewDate && p.nextReviewDate <= todayStr)
+    .sort((a, b) => a.nextReviewDate.localeCompare(b.nextReviewDate) || a.easeFactor - b.easeFactor)
+  const session = due.slice(0, MAX_DUE)
+
+  if (session.length < SESSION_SIZE) {
+    const sessionIds = new Set(session.map(p => p.id))
+    // avg EF per topic (only topics with attempts); unattempted topics rank neutral
+    const topicEF = {}
+    for (const p of db.problems) {
+      if (p.repetitions === 0) continue
+      if (!topicEF[p.topic]) topicEF[p.topic] = []
+      topicEF[p.topic].push(p.easeFactor)
+    }
+    const avgEF = t => topicEF[t] ? topicEF[t].reduce((a, b) => a + b, 0) / topicEF[t].length : 2.5
+    const diffOrder = { Easy: 0, Medium: 1, Hard: 2 }
+
+    // Weakness-weighted but randomized: rank deterministically, sample from the top band
+    const ranked = db.problems
+      .filter(p => p.status !== 'solved' && !sessionIds.has(p.id))
+      .sort((a, b) =>
+        avgEF(a.topic) - avgEF(b.topic) ||
+        diffOrder[a.difficulty] - diffOrder[b.difficulty]
+      )
+
+    const need = SESSION_SIZE - session.length
+    const band = ranked.slice(0, Math.max(need * 3, 15)) // top candidates, 3x oversampled
+    for (let i = band.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[band[i], band[j]] = [band[j], band[i]]
+    }
+    session.push(...band.slice(0, need))
+  }
+
+  res.json(session)
+})
+
+// GET /api/session-reroll — random alternative for the daily/review queue
+app.get('/api/session-reroll', (req, res) => {
+  const db = getDB()
+  const todayStr = today()
+  const exclude = new Set((req.query.exclude || '').split(',').filter(Boolean))
+
+  // Prefer another due review; otherwise any unsolved problem
+  const dueAlt = db.problems.filter(p =>
+    !exclude.has(String(p.id)) && p.nextReviewDate && p.nextReviewDate <= todayStr
+  )
+  if (dueAlt.length > 0) {
+    return res.json(dueAlt[Math.floor(Math.random() * dueAlt.length)])
+  }
+  const fresh = db.problems.filter(p => !exclude.has(String(p.id)) && p.status !== 'solved')
+  if (fresh.length === 0) return res.status(404).json({ error: 'No alternative problems available' })
+  res.json(fresh[Math.floor(Math.random() * fresh.length)])
+})
+
 // GET /api/streak
 app.get('/api/streak', (req, res) => {
   const db = getDB()
@@ -384,9 +455,78 @@ app.get('/api/focus-session', (req, res) => {
   res.json(queue.slice(0, 10))
 })
 
+// GET /api/focus-reroll — random alternative problem for the current slot
+app.get('/api/focus-reroll', (req, res) => {
+  const db = getDB()
+  const topic = req.query.topic
+  if (!topic) return res.status(400).json({ error: 'topic required' })
+  const exclude = new Set((req.query.exclude || '').split(',').filter(Boolean))
+
+  const sevenDaysOut = new Date()
+  sevenDaysOut.setDate(sevenDaysOut.getDate() + 7)
+  const sevenDaysStr = sevenDaysOut.toISOString().split('T')[0]
+
+  const candidates = db.problems.filter(p => {
+    if (p.topic !== topic) return false
+    if (exclude.has(String(p.id))) return false
+    if (p.status === 'solved' && p.easeFactor >= 2.5 && p.nextReviewDate && p.nextReviewDate > sevenDaysStr) return false
+    return true
+  })
+
+  if (candidates.length === 0) return res.status(404).json({ error: 'No alternative problems available' })
+
+  res.json(candidates[Math.floor(Math.random() * candidates.length)])
+})
+
+// GET /api/mock-interview — 3 random problems across all topics (mostly Mediums, prefer unseen)
+app.get('/api/mock-interview', (req, res) => {
+  const db = getDB()
+  const shuffle = arr => {
+    const a = [...arr]
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[a[i], a[j]] = [a[j], a[i]]
+    }
+    return a
+  }
+
+  // Prefer unseen, fall back to attempted, then anything
+  const pool = (diff) => {
+    const byDiff = db.problems.filter(p => p.difficulty === diff)
+    const unseen = byDiff.filter(p => p.status === 'unseen')
+    const attempted = byDiff.filter(p => p.status === 'attempted')
+    return [...shuffle(unseen), ...shuffle(attempted), ...shuffle(byDiff.filter(p => p.status === 'solved'))]
+  }
+
+  const session = []
+  const usedTopics = new Set()
+  const pick = (candidates, n) => {
+    for (const p of candidates) {
+      if (session.length >= 3 || n <= 0) return
+      if (session.some(s => s.id === p.id)) continue
+      // spread across topics when possible
+      if (usedTopics.has(p.topic) && candidates.some(c => !usedTopics.has(c.topic) && !session.some(s => s.id === c.id))) continue
+      session.push(p)
+      usedTopics.add(p.topic)
+      n--
+    }
+  }
+
+  pick(pool('Medium'), 2)
+  const easyHard = [...pool('Easy'), ...pool('Hard')]
+  pick([
+    ...shuffle(easyHard.filter(p => p.status === 'unseen')),
+    ...shuffle(easyHard.filter(p => p.status !== 'unseen'))
+  ], 1)
+  // backfill if anything fell short
+  if (session.length < 3) pick(shuffle(db.problems.filter(p => !session.some(s => s.id === p.id))), 3 - session.length)
+
+  res.json(session)
+})
+
 // POST /api/attempt
 app.post('/api/attempt', (req, res) => {
-  const { problemId, status, rating, timeSpent, noteEntry } = req.body
+  const { problemId, status, rating, timeSpent, noteEntry, failureTag } = req.body
   const db = getDB()
   const problem = db.problems.find(p => p.id === problemId)
   if (!problem) return res.status(404).json({ error: 'Problem not found' })
@@ -415,7 +555,8 @@ app.post('/api/attempt', (req, res) => {
     status: status || 'attempted',
     rating: rating || null,
     timeSpent: timeSpent || 0,
-    note: noteEntry || ''
+    note: noteEntry || '',
+    ...(failureTag ? { failureTag } : {})
   }
   problem.attempts.push(attempt)
 
@@ -459,6 +600,22 @@ app.post('/api/attempt', (req, res) => {
 
   saveDB(db)
 
+  // Suggest easier problems from the same sub-topic after a struggle
+  let similarEasier = []
+  if (rating && rating <= 2) {
+    const diffOrder = { Easy: 0, Medium: 1, Hard: 2 }
+    similarEasier = db.problems
+      .filter(p =>
+        p.subTopic === problem.subTopic &&
+        p.id !== problem.id &&
+        p.status !== 'solved' &&
+        diffOrder[p.difficulty] <= diffOrder[problem.difficulty]
+      )
+      .sort((a, b) => diffOrder[a.difficulty] - diffOrder[b.difficulty])
+      .slice(0, 2)
+      .map(p => ({ id: p.id, name: p.name, difficulty: p.difficulty, link: p.link }))
+  }
+
   const levelInfo = levelFromXP(db.user.xp)
   res.json({
     problem,
@@ -466,7 +623,8 @@ app.post('/api/attempt', (req, res) => {
     newBadges,
     totalXP: db.user.xp,
     levelInfo,
-    streak: db.user.currentStreak
+    streak: db.user.currentStreak,
+    similarEasier
   })
 })
 
@@ -557,11 +715,36 @@ app.get('/api/stats', (req, res) => {
   const activityLog = db.user.activityLog || {}
   const bestDay = Object.entries(activityLog).sort((a, b) => b[1] - a[1])[0]
 
+  // Speed stats — timed attempts only (timeSpent > 0)
+  const timedAttempts = problems.flatMap(p =>
+    p.attempts
+      .filter(a => a.timeSpent > 0)
+      .map(a => ({ difficulty: p.difficulty, timeSpent: a.timeSpent, status: a.status, date: a.date }))
+  )
+  const byDiff = {}
+  for (const diff of ['Easy', 'Medium', 'Hard']) {
+    const da = timedAttempts.filter(a => a.difficulty === diff)
+    byDiff[diff.toLowerCase()] = {
+      count: da.length,
+      avgTime: da.length ? Math.round(da.reduce((s, a) => s + a.timeSpent, 0) / da.length) : null
+    }
+  }
+  const timedMediums = timedAttempts.filter(a => a.difficulty === 'Medium')
+  const mediumsUnder20 = timedMediums.filter(a => a.status === 'solved' && a.timeSpent <= 20).length
+  const speedStats = {
+    byDifficulty: byDiff,
+    totalTimed: timedAttempts.length,
+    mediumTimedCount: timedMediums.length,
+    mediumUnder20Count: mediumsUnder20,
+    mediumUnder20Pct: timedMediums.length ? Math.round((mediumsUnder20 / timedMediums.length) * 100) : null
+  }
+
   res.json({
     weeklyVelocity,
     topicBreakdown,
     diffDist,
     weakPatterns,
+    speedStats,
     activityLog,
     personalRecords: {
       longestStreak: db.user.longestStreak || 0,
@@ -721,8 +904,60 @@ app.get('/api/ai-providers', (req, res) => {
   })
 })
 
-// GET /api/detailed-report  (SSE streaming)
-app.get('/api/detailed-report', async (req, res) => {
+// ── Report cache helpers ───────────────────────────────────────────────────────
+function computeDbSnapshot(db) {
+  const topicSnapshots = {}
+  const allTopics = [...new Set(db.problems.map(p => p.topic))]
+  for (const topic of allTopics) {
+    const tp = db.problems.filter(p => p.topic === topic)
+    const solved = tp.filter(p => p.status === 'solved').length
+    const noteCount = tp.reduce((s, p) => s + (p.noteEntries?.length || 0), 0)
+    const lastAttempt = tp.flatMap(p => p.attempts.map(a => a.date)).sort().pop() || null
+    topicSnapshots[topic] = { solved, noteCount, lastAttempt }
+  }
+  return {
+    totalSolved: db.problems.filter(p => p.status === 'solved').length,
+    totalNotes: db.problems.reduce((s, p) => s + (p.noteEntries?.length || 0), 0),
+    topicSnapshots
+  }
+}
+
+// GET /api/db-snapshot
+app.get('/api/db-snapshot', (req, res) => {
+  const db = getDB()
+  res.json(computeDbSnapshot(db))
+})
+
+// GET /api/report-cache
+app.get('/api/report-cache', (req, res) => {
+  const db = getDB()
+  res.json(db.reportCache || null)
+})
+
+// POST /api/report-cache
+app.post('/api/report-cache', (req, res) => {
+  const db = getDB()
+  db.reportCache = req.body
+  saveDB(db)
+  res.json({ ok: true })
+})
+
+// PATCH /api/report-action — update an action item status
+app.patch('/api/report-action', (req, res) => {
+  const { sectionId, actionId, status } = req.body
+  const db = getDB()
+  if (!db.reportCache?.sections) return res.status(404).json({ error: 'no cache' })
+  const section = db.reportCache.sections.find(s => s.id === sectionId)
+  if (!section) return res.status(404).json({ error: 'section not found' })
+  const item = section.actionItems?.find(a => a.id === actionId)
+  if (!item) return res.status(404).json({ error: 'item not found' })
+  item.status = status
+  saveDB(db)
+  res.json({ ok: true })
+})
+
+// POST /api/detailed-report  (SSE streaming — supports fresh + incremental modes)
+app.post('/api/detailed-report', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
@@ -734,32 +969,29 @@ app.get('/api/detailed-report', async (req, res) => {
     if (typeof res.flush === 'function') res.flush()
   }
 
-  const provider = req.query.provider || 'anthropic'
+  const { provider = 'anthropic', mode = 'fresh', topics, history } = req.body
   const anthropicKey = process.env.ANTHROPIC_API_KEY
   const openaiKey = process.env.OPENAI_API_KEY
 
   if (provider === 'anthropic' && !anthropicKey) {
-    send({ type: 'error', code: 'no_api_key', provider: 'anthropic' })
-    res.end()
-    return
+    send({ type: 'error', code: 'no_api_key' }); res.end(); return
   }
   if (provider === 'openai' && !openaiKey) {
-    send({ type: 'error', code: 'no_api_key', provider: 'openai' })
-    res.end()
-    return
+    send({ type: 'error', code: 'no_api_key' }); res.end(); return
   }
 
   try {
     const db = getDB()
     const problems = db.problems
     const todayStr = today()
+    const cutoff = new Date(Date.now() - 14 * 864e5).toISOString().split('T')[0]
 
-    const fourteenDaysAgo = new Date()
-    fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14)
-    const cutoff = fourteenDaysAgo.toISOString().split('T')[0]
+    // Build topic stats — filter to changed topics for incremental mode
+    const targetTopics = (mode === 'incremental' && topics?.length)
+      ? [...new Set(problems.map(p => p.topic))].filter(t => topics.includes(t))
+      : [...new Set(problems.map(p => p.topic))]
 
-    const topics = [...new Set(problems.map(p => p.topic))]
-    const topicStats = topics.map(topic => {
+    const topicStats = targetTopics.map(topic => {
       const tp = problems.filter(p => p.topic === topic)
       const solved = tp.filter(p => p.status === 'solved').length
       const attempted = tp.filter(p => p.repetitions > 0)
@@ -767,36 +999,31 @@ app.get('/api/detailed-report', async (req, res) => {
         ? (attempted.reduce((s, p) => s + p.easeFactor, 0) / attempted.length).toFixed(2)
         : null
       return {
-        topic,
-        total: tp.length,
-        solved,
+        topic, total: tp.length, solved,
         pct: Math.round((solved / tp.length) * 100),
-        avgEF,
-        subTopics: [...new Set(tp.map(p => p.subTopic))],
-        attempted: attempted.length
+        avgEF, attempted: attempted.length,
+        subTopics: [...new Set(tp.map(p => p.subTopic))]
       }
     }).filter(t => t.attempted > 0 || t.solved > 0)
 
     const problemsWithNotes = problems
-      .filter(p => p.noteEntries?.length > 0)
+      .filter(p => p.noteEntries?.length > 0 &&
+        (mode !== 'incremental' || !topics?.length || topics.includes(p.topic)))
       .map(p => ({
-        name: p.name,
-        topic: p.topic,
-        subTopic: p.subTopic,
-        difficulty: p.difficulty,
-        status: p.status,
-        ef: p.easeFactor.toFixed(2),
+        name: p.name, topic: p.topic, subTopic: p.subTopic,
+        difficulty: p.difficulty, status: p.status, ef: p.easeFactor.toFixed(2),
         notes: p.noteEntries.slice(-3).map(n => `[${n.date}] ${n.text}`).join(' | ')
       }))
 
     const recentStruggles = problems
-      .filter(p => p.attempts.some(a => a.date >= cutoff && (a.rating === 1 || a.rating === 2)))
-      .map(p => ({ name: p.name, topic: p.topic, ef: p.easeFactor.toFixed(2) }))
+      .filter(p => p.attempts.some(a => a.date >= cutoff && (a.rating === 1 || a.rating === 2)) &&
+        (mode !== 'incremental' || !topics?.length || topics.includes(p.topic)))
+      .map(p => ({
+        name: p.name, topic: p.topic, ef: p.easeFactor.toFixed(2),
+        failureModes: [...new Set(p.attempts.filter(a => a.failureTag).map(a => a.failureTag))]
+      }))
 
-    const overdue = problems
-      .filter(p => p.nextReviewDate && p.nextReviewDate < todayStr)
-      .map(p => p.name)
-
+    const overdue = problems.filter(p => p.nextReviewDate && p.nextReviewDate < todayStr).map(p => p.name)
     const solved = problems.filter(p => p.status === 'solved').length
 
     const contextData = {
@@ -810,6 +1037,17 @@ app.get('/api/detailed-report', async (req, res) => {
       overdueCount: overdue.length, overdueNames: overdue.slice(0, 10)
     }
 
+    // Build history context block
+    let historyBlock = ''
+    if (history?.length) {
+      const completed = history.filter(h => h.status === 'completed')
+      const rejected = history.filter(h => h.status === 'rejected')
+      const kept = history.filter(h => h.status === 'kept')
+      if (completed.length) historyBlock += `\nPreviously completed (mark as done, don't re-suggest):\n${completed.map(h => `- [${h.section}] ${h.text}`).join('\n')}`
+      if (rejected.length) historyBlock += `\nPreviously rejected (do NOT suggest again):\n${rejected.map(h => `- [${h.section}] ${h.text}`).join('\n')}`
+      if (kept.length) historyBlock += `\nCurrently tracked by user (include/update these):\n${kept.map(h => `- [${h.section}] ${h.text}`).join('\n')}`
+    }
+
     const systemPrompt = `You are an expert DSA coach analyzing a student's practice journal. Give a brutally honest, specific, actionable improvement plan based on their progress data and notes.
 
 Output format (strict markdown):
@@ -819,7 +1057,17 @@ Output format (strict markdown):
 - Reference actual problem names and patterns from their notes
 - Tone: direct, like a senior engineer doing a code review`
 
-    const userPrompt = `Here is my DSA practice data. Generate a detailed section-by-section action plan with specific todos based on what my notes reveal.
+    const userPrompt = mode === 'incremental'
+      ? `Update ONLY the sections for these changed topics: ${topics?.join(', ')}.
+Use ## headings matching the topic names. Same format as a full report (diagnosis + - [ ] todos).
+${historyBlock}
+
+Updated data:
+${JSON.stringify(contextData, null, 2)}
+
+Be specific. Name actual problems.`
+      : `Generate a detailed section-by-section action plan with specific todos based on my DSA practice data and notes.
+${historyBlock}
 
 ${JSON.stringify(contextData, null, 2)}
 
@@ -828,9 +1076,7 @@ Be specific. Name actual problems. Tell me exactly what to do next.`
     if (provider === 'openai') {
       const client = new OpenAI({ apiKey: openaiKey })
       const stream = await client.chat.completions.create({
-        model: 'gpt-4o',
-        max_tokens: 8000,
-        stream: true,
+        model: 'gpt-4o', max_tokens: 8000, stream: true,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -843,8 +1089,7 @@ Be specific. Name actual problems. Tell me exactly what to do next.`
     } else {
       const client = new Anthropic({ apiKey: anthropicKey })
       const stream = client.messages.stream({
-        model: 'claude-opus-4-6',
-        max_tokens: 8000,
+        model: 'claude-opus-4-6', max_tokens: 8000,
         thinking: { type: 'adaptive' },
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]

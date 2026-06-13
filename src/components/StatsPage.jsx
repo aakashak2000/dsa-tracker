@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer
 } from 'recharts'
-import { Trophy, Flame, Zap, TrendingDown } from 'lucide-react'
+import { Trophy, Flame, Zap, TrendingDown, Timer } from 'lucide-react'
 import axios from 'axios'
 
 function HeatmapCell({ count }) {
@@ -36,7 +36,7 @@ export default function StatsPage() {
     )
   }
 
-  const { weeklyVelocity, topicBreakdown, diffDist, weakPatterns, activityLog, personalRecords, badges } = stats
+  const { weeklyVelocity, topicBreakdown, diffDist, weakPatterns, speedStats, activityLog, personalRecords, badges } = stats
 
   // Build 365-day heatmap
   const heatmapCells = []
@@ -148,6 +148,48 @@ export default function StatsPage() {
             )
           })}
         </div>
+      </div>
+
+      {/* Interview Speed */}
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+        <div className="flex items-center gap-2 mb-1">
+          <Timer size={16} className="text-brand-400" />
+          <h2 className="text-sm font-semibold text-gray-300">Interview Speed</h2>
+        </div>
+        <p className="text-xs text-gray-600 mb-4">Target: Mediums in under 20 minutes — that's interview pace.</p>
+        {speedStats?.totalTimed > 0 ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-gray-800 rounded-xl p-4 text-center">
+              <div className={`text-2xl font-bold ${
+                speedStats.mediumUnder20Pct === null ? 'text-gray-500' :
+                speedStats.mediumUnder20Pct >= 70 ? 'text-green-400' :
+                speedStats.mediumUnder20Pct >= 40 ? 'text-amber-400' : 'text-red-400'
+              }`}>
+                {speedStats.mediumUnder20Pct !== null ? `${speedStats.mediumUnder20Pct}%` : '—'}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">Mediums solved &lt;20 min</div>
+              <div className="text-[10px] text-gray-600 mt-0.5">{speedStats.mediumUnder20Count}/{speedStats.mediumTimedCount} timed</div>
+            </div>
+            {[
+              { label: 'Easy', key: 'easy', text: 'text-green-400' },
+              { label: 'Medium', key: 'medium', text: 'text-amber-400' },
+              { label: 'Hard', key: 'hard', text: 'text-red-400' }
+            ].map(({ label, key, text }) => {
+              const d = speedStats.byDifficulty[key]
+              return (
+                <div key={key} className="bg-gray-800 rounded-xl p-4 text-center">
+                  <div className={`text-2xl font-bold ${d.avgTime !== null ? text : 'text-gray-500'}`}>
+                    {d.avgTime !== null ? `${d.avgTime}m` : '—'}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">Avg {label} time</div>
+                  <div className="text-[10px] text-gray-600 mt-0.5">{d.count} timed attempts</div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-600">No timed attempts yet. Focus Mode now times every problem automatically — your speed data will show up here.</p>
+        )}
       </div>
 
       {/* Topic Breakdown */}

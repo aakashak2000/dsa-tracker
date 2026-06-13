@@ -1,5 +1,6 @@
-import React, { useState } from 'react'
-import { X, ExternalLink, Clock, Lightbulb } from 'lucide-react'
+import React, { useState, useEffect } from 'react'
+import { X, ExternalLink, Clock, Lightbulb, AlertTriangle } from 'lucide-react'
+import { startTimer, getElapsedMinutes, clearTimer, expectedMinutes } from '../utils/timer.js'
 
 const RATING_CONFIG = [
   { value: 1, label: 'Again', desc: 'No idea', color: 'bg-red-600 hover:bg-red-500 border-red-500' },
@@ -8,12 +9,37 @@ const RATING_CONFIG = [
   { value: 5, label: 'Easy', desc: 'Solved cleanly', color: 'bg-green-600 hover:bg-green-500 border-green-500' }
 ]
 
+const FAILURE_TAGS = [
+  { value: 'pattern', label: "Didn't see the pattern" },
+  { value: 'implementation', label: 'Knew it, fumbled code' },
+  { value: 'edge_cases', label: 'Edge cases got me' },
+  { value: 'blanked', label: 'Blanked completely' }
+]
+
+const TIME_CHIPS = [5, 10, 15, 20, 30, 45]
+
 export default function LogAttemptModal({ problem, onClose, onSubmit }) {
   const [status, setStatus] = useState('solved')
   const [rating, setRating] = useState(null)
   const [timeSpent, setTimeSpent] = useState('')
   const [noteEntry, setNoteEntry] = useState('')
+  const [failureTag, setFailureTag] = useState(null)
+  const [timerWarning, setTimerWarning] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+
+  // Prefill from timer (started when "Open Problem" was clicked)
+  useEffect(() => {
+    const elapsed = getElapsedMinutes(problem.id)
+    if (elapsed === null) return
+    const expected = expectedMinutes(problem.difficulty)
+    const cap = expected * 2
+    if (elapsed > cap) {
+      setTimeSpent(String(expected))
+      setTimerWarning(`Timer ran ${elapsed}m — you may have stepped away. Prefilled ${expected}m, adjust below.`)
+    } else {
+      setTimeSpent(String(elapsed))
+    }
+  }, [problem.id, problem.difficulty])
 
   const handleSubmit = async () => {
     if (!rating) return
@@ -23,8 +49,10 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
         status,
         rating,
         timeSpent: parseInt(timeSpent) || 0,
-        noteEntry
+        noteEntry,
+        failureTag: rating <= 2 ? failureTag : null
       })
+      clearTimer()
       onClose()
     } finally {
       setSubmitting(false)
@@ -54,8 +82,9 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
               href={problem.link}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => startTimer(problem.id)}
               className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-800 rounded-lg"
-              title="Open problem"
+              title="Open problem (starts timer)"
             >
               <ExternalLink size={16} />
             </a>
@@ -92,6 +121,12 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
             <label className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
               <Clock size={12} /> Time Spent (minutes)
             </label>
+            {timerWarning && (
+              <div className="flex items-start gap-1.5 mb-2 px-2.5 py-1.5 bg-amber-900/20 border border-amber-700/30 rounded-lg">
+                <AlertTriangle size={11} className="text-amber-400 mt-0.5 shrink-0" />
+                <span className="text-[11px] text-amber-300/90">{timerWarning}</span>
+              </div>
+            )}
             <input
               type="number"
               value={timeSpent}
@@ -100,6 +135,21 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
               min="1"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
             />
+            <div className="flex gap-1.5 mt-2">
+              {TIME_CHIPS.map(m => (
+                <button
+                  key={m}
+                  onClick={() => setTimeSpent(String(m))}
+                  className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${
+                    parseInt(timeSpent) === m
+                      ? 'bg-brand-600/30 border-brand-500 text-brand-300'
+                      : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600'
+                  }`}
+                >
+                  {m}m
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Confidence Rating */}
@@ -124,6 +174,33 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
               <Lightbulb size={10} /> Keys: 1=Again, 2=Hard, 3=Good, 4=Easy
             </p>
           </div>
+
+          {/* Failure mode tagging — only when struggling */}
+          {rating !== null && rating <= 2 && (
+            <div>
+              <label className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 block">
+                Why did it go wrong?
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {FAILURE_TAGS.map(t => (
+                  <button
+                    key={t.value}
+                    onClick={() => setFailureTag(f => f === t.value ? null : t.value)}
+                    className={`py-2 px-3 rounded-lg border text-xs font-medium text-left transition-all ${
+                      failureTag === t.value
+                        ? 'border-purple-500 bg-purple-600/20 text-purple-300'
+                        : 'border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-gray-600 mt-1.5">
+                This feeds the AI report — it'll diagnose your failure patterns, not just weak topics.
+              </p>
+            </div>
+          )}
 
           {/* Notes */}
           <div>

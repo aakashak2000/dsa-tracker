@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, ListChecks, Zap, RotateCcw,
-  BookOpen, BarChart2, Sun, Moon, ChevronLeft, ChevronRight,
+  BookOpen, BarChart2, BrainCircuit, Sun, Moon, ChevronLeft, ChevronRight,
   Flame, Star
 } from 'lucide-react'
 import axios from 'axios'
@@ -14,7 +14,8 @@ const navItems = [
   { to: '/focus', icon: Zap, label: 'Focus Mode' },
   { to: '/review', icon: RotateCcw, label: 'Review Queue' },
   { to: '/notes', icon: BookOpen, label: 'Notes' },
-  { to: '/stats', icon: BarChart2, label: 'Stats' }
+  { to: '/stats', icon: BarChart2, label: 'Stats' },
+  { to: '/ai-report', icon: BrainCircuit, label: 'AI Report' }
 ]
 
 export default function Sidebar({ darkMode, setDarkMode }) {

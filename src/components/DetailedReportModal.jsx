@@ -2,6 +2,44 @@ import React, { useState, useEffect, useRef } from 'react'
 import { X, Loader2, AlertCircle, ClipboardList, ExternalLink } from 'lucide-react'
 import axios from 'axios'
 
+async function readSSEStream(url, onText, onDone, onError, abortSignal) {
+  let res
+  try {
+    res = await fetch(url, { signal: abortSignal })
+  } catch (e) {
+    if (e.name !== 'AbortError') onError('Connection failed. Is the server running?')
+    return
+  }
+  if (!res.ok) { onError(`Server error: ${res.status}`); return }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+
+  while (true) {
+    let result
+    try { result = await reader.read() } catch { break }
+    const { value, done } = result
+    if (done) break
+
+    buf += decoder.decode(value, { stream: true })
+    const parts = buf.split('\n\n')
+    buf = parts.pop()
+
+    for (const part of parts) {
+      for (const line of part.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.type === 'text') onText(data.text)
+          else if (data.type === 'done') { onDone(); return }
+          else if (data.type === 'error') { onError(data.message || 'Unknown error', data.code); return }
+        } catch {}
+      }
+    }
+  }
+}
+
 function renderMarkdown(text) {
   if (!text) return ''
   return text
@@ -68,11 +106,12 @@ function NoKeyInstructions({ providers }) {
 export default function DetailedReportModal({ onClose }) {
   const [providers, setProviders] = useState({ anthropic: false, openai: false })
   const [selectedProvider, setSelectedProvider] = useState(null)
+  const [streamKey, setStreamKey] = useState(0) // incrementing this starts a new stream
   const [text, setText] = useState('')
   const [status, setStatus] = useState('init') // init | selecting | loading | streaming | done | error
   const [error, setError] = useState(null)
   const bottomRef = useRef(null)
-  const esRef = useRef(null)
+  const abortRef = useRef(null)
 
   // Fetch available providers on mount
   useEffect(() => {
@@ -83,53 +122,46 @@ export default function DetailedReportModal({ onClose }) {
       if (available.length === 0) {
         setStatus('no_key')
       } else if (available.length === 1) {
-        // Only one available — skip selection, go straight
         setSelectedProvider(available[0])
+        setStreamKey(k => k + 1)
         setStatus('loading')
       } else {
-        // Both available — let user pick
         setStatus('selecting')
       }
     }).catch(() => setStatus('error'))
   }, [])
 
-  // Start stream once provider is chosen and status is loading
+  // Start stream — depends only on streamKey so status changes mid-stream don't abort it
   useEffect(() => {
-    if (status !== 'loading' || !selectedProvider) return
+    if (streamKey === 0 || !selectedProvider) return
 
-    const es = new EventSource(`/api/detailed-report?provider=${selectedProvider}`)
-    esRef.current = es
+    const controller = new AbortController()
+    abortRef.current = controller
 
-    es.onmessage = (e) => {
-      const data = JSON.parse(e.data)
-      if (data.type === 'text') {
+    readSSEStream(
+      `http://localhost:3001/api/detailed-report?provider=${selectedProvider}`,
+      (chunk) => {
         setStatus('streaming')
-        setText(prev => prev + data.text)
+        setText(prev => prev + chunk)
         setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 50)
-      } else if (data.type === 'done') {
-        setStatus('done')
-        es.close()
-      } else if (data.type === 'error') {
-        if (data.code === 'no_api_key') setStatus('no_key')
-        else { setStatus('error'); setError(data.message || 'Unknown error') }
-        es.close()
-      }
-    }
+      },
+      () => setStatus('done'),
+      (msg, code) => {
+        if (code === 'no_api_key') setStatus('no_key')
+        else { setStatus('error'); setError(msg) }
+      },
+      controller.signal
+    )
 
-    es.onerror = () => {
-      setStatus('error')
-      setError('Connection lost. Is the server running?')
-      es.close()
-    }
+    return () => controller.abort()
+  }, [streamKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
-    return () => es.close()
-  }, [status, selectedProvider])
-
-  const handleClose = () => { esRef.current?.close(); onClose() }
+  const handleClose = () => { abortRef.current?.abort(); onClose() }
 
   const startWithProvider = (p) => {
     setSelectedProvider(p)
     setStatus('loading')
+    setStreamKey(k => k + 1)
   }
 
   const providerLabel = selectedProvider ? PROVIDERS[selectedProvider]?.label : null

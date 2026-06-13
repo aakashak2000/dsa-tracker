@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import axios from 'axios'
 import { formatDueDate } from '../utils/sm2.js'
+import { startTimer } from '../utils/timer.js'
 import LogAttemptModal from './LogAttemptModal.jsx'
 import NotePanel from './NotePanel.jsx'
 import { useToast } from './ToastProvider.jsx'
@@ -203,6 +204,10 @@ export default function ProblemSheet() {
       if (res.data.newBadges?.length > 0) {
         res.data.newBadges.forEach(b => toast(`${b.emoji} Badge unlocked: ${b.label}!`, 'badge'))
       }
+      if (res.data.similarEasier?.length > 0) {
+        const s = res.data.similarEasier[0]
+        toast(`💡 Rebuild with: "${s.name}" (${s.difficulty}, same pattern)`, 'info')
+      }
     } catch (e) {
       toast('Failed to log attempt', 'error')
     }
@@ -364,6 +369,7 @@ export default function ProblemSheet() {
                       href={problem.link}
                       target="_blank"
                       rel="noopener noreferrer"
+                      onClick={() => startTimer(problem.id)}
                       className="text-gray-200 hover:text-brand-400 font-medium flex items-center gap-1.5 group/link"
                     >
                       <span className="truncate">{problem.name}</span>

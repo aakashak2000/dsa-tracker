@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
-import { Search, BookOpen, Bot, Lightbulb, TrendingDown, Target } from 'lucide-react'
+import { Search, BookOpen, Bot, Lightbulb, TrendingDown, Target, Layers } from 'lucide-react'
 import axios from 'axios'
 
 const ratingLabels = { 1: 'Again', 2: 'Hard', 4: 'Good', 5: 'Easy' }
@@ -23,6 +23,7 @@ export default function NotesPage() {
   const [selected, setSelected] = useState(null)
   const [newNote, setNewNote] = useState('')
   const [saving, setSaving] = useState(false)
+  const [view, setView] = useState('journal')
 
   useEffect(() => {
     const fetchProblems = async () => {
@@ -83,6 +84,24 @@ export default function NotesPage() {
     return { struggling, weakTopics, suggested }
   }, [problems])
 
+  // Cheat sheet: notes grouped by topic → subTopic
+  const cheatSheet = useMemo(() => {
+    const topics = {}
+    for (const p of filtered) {
+      if (!topics[p.topic]) topics[p.topic] = {}
+      if (!topics[p.topic][p.subTopic]) topics[p.topic][p.subTopic] = []
+      topics[p.topic][p.subTopic].push(p)
+    }
+    return Object.entries(topics)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([topic, subs]) => ({
+        topic,
+        subTopics: Object.entries(subs)
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([subTopic, probs]) => ({ subTopic, problems: probs }))
+      }))
+  }, [filtered])
+
   const handleAddNote = async () => {
     if (!newNote.trim() || !selected) return
     setSaving(true)
@@ -116,10 +135,26 @@ export default function NotesPage() {
           <div className="flex items-center gap-2 mb-3">
             <Lightbulb size={16} className="text-amber-400" />
             <h2 className="text-sm font-semibold text-gray-200">Revision Briefing</h2>
+            <div className="ml-auto flex items-center bg-gray-800 border border-gray-700 rounded-lg p-0.5">
+              {[
+                { value: 'journal', label: 'Journal', icon: BookOpen },
+                { value: 'cheatsheet', label: 'Cheat Sheet', icon: Layers }
+              ].map(v => (
+                <button
+                  key={v.value}
+                  onClick={() => setView(v.value)}
+                  className={`flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors ${
+                    view === v.value ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  <v.icon size={11} /> {v.label}
+                </button>
+              ))}
+            </div>
             <button
               disabled
               title="Add ANTHROPIC_API_KEY to .env to enable AI briefings"
-              className="ml-auto flex items-center gap-1.5 px-3 py-1 bg-gray-800 border border-gray-700 text-gray-600 text-xs rounded-lg cursor-not-allowed"
+              className="flex items-center gap-1.5 px-3 py-1 bg-gray-800 border border-gray-700 text-gray-600 text-xs rounded-lg cursor-not-allowed"
             >
               <Bot size={12} /> Generate AI Briefing
             </button>
@@ -183,7 +218,75 @@ export default function NotesPage() {
         </div>
       </div>
 
+      {/* Cheat sheet view */}
+      {view === 'cheatsheet' && (
+        <div className="flex-1 overflow-y-auto p-5">
+          <div className="max-w-3xl mx-auto space-y-6">
+            <div className="relative max-w-xs">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Filter by problem or topic…"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-1.5 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
+              />
+            </div>
+            {cheatSheet.length === 0 ? (
+              <div className="text-center py-16">
+                <Layers size={32} className="text-gray-700 mx-auto mb-3" />
+                <p className="text-gray-500 text-sm">No notes yet — your cheat sheet builds itself as you take notes.</p>
+              </div>
+            ) : (
+              cheatSheet.map(({ topic, subTopics }) => (
+                <div key={topic}>
+                  <h2 className="text-sm font-bold text-brand-400 uppercase tracking-wider mb-3 sticky top-0 bg-gray-950/90 backdrop-blur py-1">{topic}</h2>
+                  <div className="space-y-4">
+                    {subTopics.map(({ subTopic, problems: probs }) => (
+                      <div key={subTopic} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                        <h3 className="text-xs font-semibold text-gray-400 mb-3">{subTopic}</h3>
+                        <div className="space-y-3">
+                          {probs.map(p => (
+                            <div key={p.id} className="border-l-2 border-gray-700 pl-3">
+                              <div className="flex items-center gap-2 mb-1">
+                                <EFIndicator ef={p.easeFactor} />
+                                <a
+                                  href={p.link}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-sm text-gray-200 hover:text-brand-300 font-medium"
+                                >
+                                  {p.name}
+                                </a>
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded
+                                  ${p.difficulty === 'Easy' ? 'bg-green-900/50 text-green-400' :
+                                    p.difficulty === 'Medium' ? 'bg-amber-900/50 text-amber-400' :
+                                    'bg-red-900/50 text-red-400'}`}
+                                >
+                                  {p.difficulty}
+                                </span>
+                              </div>
+                              <div className="space-y-1">
+                                {p.noteEntries.map((entry, i) => (
+                                  <p key={i} className="text-xs text-gray-400 leading-relaxed">
+                                    <span className="text-gray-600">{entry.date} —</span> {entry.text}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Main notes area */}
+      {view === 'journal' && (
       <div className="flex flex-1 overflow-hidden">
         {/* Left: problem list */}
         <div className="w-72 border-r border-gray-800 flex flex-col shrink-0">
@@ -319,6 +422,7 @@ export default function NotesPage() {
           )}
         </div>
       </div>
+      )}
     </div>
   )
 }

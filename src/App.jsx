@@ -7,6 +7,7 @@ import FocusMode from './components/FocusMode.jsx'
 import ReviewQueue from './components/ReviewQueue.jsx'
 import NotesPage from './components/NotesPage.jsx'
 import StatsPage from './components/StatsPage.jsx'
+import DetailedReportPage from './components/DetailedReportPage.jsx'
 import ToastProvider from './components/ToastProvider.jsx'
 
 export default function App() {
@@ -34,6 +35,7 @@ export default function App() {
                 <Route path="/review" element={<ReviewQueue />} />
                 <Route path="/notes" element={<NotesPage />} />
                 <Route path="/stats" element={<StatsPage />} />
+                <Route path="/ai-report" element={<DetailedReportPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </main>

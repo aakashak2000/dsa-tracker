@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import { ExternalLink, ChevronLeft, Zap, CheckCircle, BarChart2, ChevronDown } from 'lucide-react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
+import { ExternalLink, ChevronLeft, Zap, CheckCircle, BarChart2, ChevronDown, Shuffle, Timer, BookOpen, Briefcase } from 'lucide-react'
 import axios from 'axios'
 import { useToast } from './ToastProvider.jsx'
 
@@ -60,6 +60,33 @@ export default function FocusMode() {
   const [showNotes, setShowNotes] = useState(false)
   const [sessionResults, setSessionResults] = useState([])
   const [sessionXP, setSessionXP] = useState(0)
+  const [rerolling, setRerolling] = useState(false)
+  const [mode, setMode] = useState('focus') // focus | mock
+  const [problemStart, setProblemStart] = useState(null)
+  const [sessionStart, setSessionStart] = useState(null)
+  const [now, setNow] = useState(Date.now())
+  const timeUpToastShown = useRef(false)
+
+  // Tick every second during a session (drives problem timer + mock countdown)
+  useEffect(() => {
+    if (phase !== 'session') return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [phase])
+
+  // Reset per-problem timer whenever the current problem changes
+  useEffect(() => {
+    if (phase === 'session') setProblemStart(Date.now())
+  }, [phase, idx])
+
+  // Mock interview: one-time "time's up" notice at 60 min
+  useEffect(() => {
+    if (phase !== 'session' || mode !== 'mock' || !sessionStart || timeUpToastShown.current) return
+    if (now - sessionStart >= 60 * 60 * 1000) {
+      timeUpToastShown.current = true
+      toast("Time's up! Rate what you have — in a real interview this is the whiteboard moment.", 'info')
+    }
+  }, [now, phase, mode, sessionStart, toast])
 
   const fetchStats = useCallback(async () => {
     try {
@@ -82,20 +109,28 @@ export default function FocusMode() {
     return () => window.removeEventListener('keydown', handler)
   })
 
+  const beginSession = (problems, sessionMode, topicLabel) => {
+    setMode(sessionMode)
+    setSelectedTopic(topicLabel)
+    setQueue(problems)
+    setIdx(0)
+    setSessionResults([])
+    setSessionXP(0)
+    setSessionStart(Date.now())
+    setProblemStart(Date.now())
+    timeUpToastShown.current = false
+    setPhase('session')
+  }
+
   const startSession = async (topic) => {
     setSessionLoading(true)
-    setSelectedTopic(topic)
     try {
       const res = await axios.get(`/api/focus-session?topic=${encodeURIComponent(topic)}`)
       if (res.data.length === 0) {
         toast('No problems available for this topic!', 'info')
         return
       }
-      setQueue(res.data)
-      setIdx(0)
-      setSessionResults([])
-      setSessionXP(0)
-      setPhase('session')
+      beginSession(res.data, 'focus', topic)
     } catch (e) {
       toast('Failed to load session', 'error')
     } finally {
@@ -103,16 +138,35 @@ export default function FocusMode() {
     }
   }
 
-  const handleRate = async (ratingValue) => {
+  const startMockInterview = async () => {
+    setSessionLoading(true)
+    try {
+      const res = await axios.get('/api/mock-interview')
+      if (res.data.length === 0) {
+        toast('No problems available!', 'info')
+        return
+      }
+      beginSession(res.data, 'mock', 'Mock Interview')
+    } catch (e) {
+      toast('Failed to load mock interview', 'error')
+    } finally {
+      setSessionLoading(false)
+    }
+  }
+
+  const handleRate = async (ratingValue, { failureTag = null } = {}) => {
     const problem = queue[idx]
     if (!problem || rating !== null) return
     setRating(ratingValue)
+    const timeSpent = problemStart ? Math.max(1, Math.round((Date.now() - problemStart) / 60000)) : 0
 
     try {
       const res = await axios.post('/api/attempt', {
         problemId: problem.id,
         status: ratingValue >= 4 ? 'solved' : ratingValue >= 3 ? 'solved' : 'attempted',
-        rating: ratingValue
+        rating: ratingValue,
+        timeSpent,
+        ...(failureTag ? { failureTag } : {})
       })
       const xpGained = res.data.xpGained || 0
       setSessionXP(s => s + xpGained)
@@ -133,6 +187,22 @@ export default function FocusMode() {
         setIdx(next)
       }
     }, 500)
+  }
+
+  const handleReroll = async () => {
+    if (rerolling || rating !== null) return
+    setRerolling(true)
+    try {
+      const exclude = queue.map(p => p.id).join(',')
+      const res = await axios.get(`/api/focus-reroll?topic=${encodeURIComponent(selectedTopic)}&exclude=${exclude}`)
+      setQueue(q => q.map((p, i) => (i === idx ? res.data : p)))
+      setShowNotes(false)
+      setProblemStart(Date.now())
+    } catch (e) {
+      toast(e.response?.status === 404 ? 'No other problems available for this topic' : 'Reroll failed', 'info')
+    } finally {
+      setRerolling(false)
+    }
   }
 
   const subTopicsCovered = [...new Set(sessionResults.map(r => r.subTopic))]
@@ -204,7 +274,7 @@ export default function FocusMode() {
               Back to Topics
             </button>
             <button
-              onClick={() => startSession(selectedTopic)}
+              onClick={() => mode === 'mock' ? startMockInterview() : startSession(selectedTopic)}
               className="flex-1 py-2.5 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-sm font-medium flex items-center justify-center gap-2"
             >
               <Zap size={14} /> New Session
@@ -219,6 +289,16 @@ export default function FocusMode() {
     const problem = queue[idx]
     if (!problem) return null
 
+    // Per-problem timer (blog rule: nudge at 15 min, red at 20)
+    const elapsedSec = problemStart ? Math.floor((now - problemStart) / 1000) : 0
+    const elapsedMin = Math.floor(elapsedSec / 60)
+    const fmt = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+    const timerColor = elapsedMin >= 20 ? 'text-red-400' : elapsedMin >= 15 ? 'text-amber-400' : 'text-gray-500'
+
+    // Mock interview countdown (60 min)
+    const MOCK_LIMIT = 60 * 60
+    const remainingSec = sessionStart ? Math.max(0, MOCK_LIMIT - Math.floor((now - sessionStart) / 1000)) : MOCK_LIMIT
+
     return (
       <div className="flex flex-col items-center justify-center h-full p-6">
         {/* Back + progress */}
@@ -230,8 +310,25 @@ export default function FocusMode() {
             >
               <ChevronLeft size={16} /> {selectedTopic}
             </button>
-            <span className="text-xs text-gray-500">{idx + 1} / {queue.length}</span>
+            <div className="flex items-center gap-4">
+              {mode === 'mock' && (
+                <span className={`flex items-center gap-1.5 text-xs font-mono font-medium ${remainingSec <= 300 ? 'text-red-400' : 'text-gray-400'}`}>
+                  <Briefcase size={12} /> {fmt(remainingSec)}
+                </span>
+              )}
+              <span className={`flex items-center gap-1.5 text-xs font-mono font-medium ${timerColor}`}>
+                <Timer size={12} /> {fmt(elapsedSec)}
+              </span>
+              <span className="text-xs text-gray-500">{idx + 1} / {queue.length}</span>
+            </div>
           </div>
+          {elapsedMin >= 15 && rating === null && (
+            <p className={`text-xs mb-2 ${elapsedMin >= 20 ? 'text-red-400' : 'text-amber-400'}`}>
+              {elapsedMin >= 20
+                ? '20+ min — past interview pace. Look up the solution, understand it, and move on.'
+                : 'Stuck for 15 min? Look it up, flag it, move on — breadth beats grinding.'}
+            </p>
+          )}
           <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
             <div
               className="h-full bg-brand-500 rounded-full transition-all"
@@ -264,14 +361,34 @@ export default function FocusMode() {
           </div>
 
           <div className="p-4 flex items-center justify-between border-b border-gray-800">
-            <a
-              href={problem.link}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm rounded-xl border border-gray-700"
-            >
-              <ExternalLink size={14} /> Open Problem
-            </a>
+            <div className="flex items-center gap-2">
+              <a
+                href={problem.link}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm rounded-xl border border-gray-700"
+              >
+                <ExternalLink size={14} /> Open Problem
+              </a>
+              {mode !== 'mock' && (
+                <button
+                  onClick={handleReroll}
+                  disabled={rerolling || rating !== null}
+                  title="Swap for a different problem"
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-xl border border-gray-700 disabled:opacity-50"
+                >
+                  <Shuffle size={14} className={rerolling ? 'animate-spin' : ''} /> Reroll
+                </button>
+              )}
+              <button
+                onClick={() => handleRate(1, { failureTag: 'looked_up' })}
+                disabled={rating !== null}
+                title="Gave up and read the solution — logs as Again so it comes back soon"
+                className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-xl border border-gray-700 disabled:opacity-50"
+              >
+                <BookOpen size={14} /> Looked it up
+              </button>
+            </div>
             {problem.noteEntries?.length > 0 && (
               <button
                 onClick={() => setShowNotes(s => !s)}
@@ -337,6 +454,26 @@ export default function FocusMode() {
             <Zap size={32} className="text-brand-400 mx-auto mb-3 animate-pulse" />
             <p className="text-gray-400">Building your session queue…</p>
           </div>
+        </div>
+      )}
+
+      {!sessionLoading && (
+        <div className="mb-6 bg-gray-900 border border-gray-800 rounded-2xl p-5 flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-purple-900/40 border border-purple-800/50 flex items-center justify-center">
+              <Briefcase size={18} className="text-purple-400" />
+            </div>
+            <div>
+              <h3 className="text-white font-semibold text-sm">Mock Interview</h3>
+              <p className="text-xs text-gray-500 mt-0.5">3 random problems across all topics · 60 minutes · no rerolls</p>
+            </div>
+          </div>
+          <button
+            onClick={startMockInterview}
+            className="px-5 py-2 bg-purple-700 hover:bg-purple-600 text-white text-sm font-medium rounded-xl flex items-center gap-2"
+          >
+            <Timer size={14} /> Start Mock
+          </button>
         </div>
       )}
 

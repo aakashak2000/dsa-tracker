@@ -4,10 +4,9 @@ import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend
 } from 'recharts'
-import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink, FileBarChart, BrainCircuit } from 'lucide-react'
+import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink, FileBarChart, BrainCircuit, Zap, ListTodo } from 'lucide-react'
 import axios from 'axios'
 import ReportModal from './ReportModal.jsx'
-import DetailedReportModal from './DetailedReportModal.jsx'
 
 function SkeletonCard() {
   return <div className="skeleton h-24 rounded-2xl" />
@@ -77,18 +76,28 @@ export default function Dashboard() {
   const [dueProblems, setDueProblems] = useState([])
   const [loading, setLoading] = useState(true)
   const [showReport, setShowReport] = useState(false)
-  const [showDetailedReport, setShowDetailedReport] = useState(false)
+  const [pendingActions, setPendingActions] = useState([])
+
   const navigate = useNavigate()
 
   useEffect(() => {
     const fetchAll = async () => {
       try {
-        const [dashRes, dueRes] = await Promise.all([
+        const [dashRes, dueRes, cacheRes] = await Promise.all([
           axios.get('/api/dashboard'),
-          axios.get('/api/due-today')
+          axios.get('/api/due-today'),
+          axios.get('/api/report-cache').catch(() => ({ data: null }))
         ])
         setData(dashRes.data)
         setDueProblems(dueRes.data.slice(0, 10))
+        const sections = cacheRes.data?.sections || []
+        setPendingActions(
+          sections.flatMap(s =>
+            (s.actionItems || [])
+              .filter(a => a.status === 'pending' || a.status === 'kept')
+              .map(a => ({ ...a, section: s.title }))
+          ).slice(0, 3)
+        )
       } catch (e) {
         console.error(e)
       } finally {
@@ -128,6 +137,13 @@ export default function Dashboard() {
         <div className="flex items-center gap-3">
           <div className="text-xs text-gray-600">{new Date().toLocaleDateString('en', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
           <button
+            onClick={() => navigate('/review?mode=today')}
+            className="flex items-center gap-2 px-4 py-2 bg-green-700 hover:bg-green-600 border border-green-600 text-white text-sm font-semibold rounded-xl transition-all"
+          >
+            <Zap size={15} />
+            Start Today
+          </button>
+          <button
             onClick={() => setShowReport(true)}
             className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-white text-sm font-medium rounded-xl transition-all"
           >
@@ -135,7 +151,7 @@ export default function Dashboard() {
             Get Report
           </button>
           <button
-            onClick={() => setShowDetailedReport(true)}
+            onClick={() => navigate('/ai-report')}
             className="flex items-center gap-2 px-3 py-2 bg-brand-700 hover:bg-brand-600 border border-brand-600 text-white text-sm font-medium rounded-xl transition-all"
           >
             <BrainCircuit size={15} />
@@ -143,6 +159,36 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {/* Pending AI action items */}
+      {pendingActions.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+              <ListTodo size={15} className="text-brand-400" /> From your AI Report
+            </h2>
+            <button
+              onClick={() => navigate('/ai-report')}
+              className="flex items-center gap-1 text-xs text-brand-400 hover:text-brand-300"
+            >
+              View all <ArrowRight size={11} />
+            </button>
+          </div>
+          <div className="space-y-1.5">
+            {pendingActions.map(a => (
+              <button
+                key={a.id}
+                onClick={() => navigate('/ai-report')}
+                className="w-full flex items-start gap-2.5 py-1.5 px-2 rounded-lg hover:bg-gray-800/50 text-left"
+              >
+                <span className="mt-1 w-3.5 h-3.5 rounded border border-brand-500/60 shrink-0" />
+                <span className="text-sm text-gray-300 flex-1">{a.text}</span>
+                <span className="text-[10px] text-gray-600 shrink-0 mt-1">{a.section}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -329,7 +375,6 @@ export default function Dashboard() {
       </div>
 
       {showReport && <ReportModal onClose={() => setShowReport(false)} />}
-      {showDetailedReport && <DetailedReportModal onClose={() => setShowDetailedReport(false)} />}
 
       {/* Badges */}
       {!loading && data?.badges?.length > 0 && (
