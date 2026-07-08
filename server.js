@@ -19,8 +19,11 @@ app.use((req, res, next) => {
   next()
 })
 
-const DB_PATH = path.join(__dirname, '..', 'db.json')
-const CSV_PATH = path.join(__dirname, '..', 'master_dsa_sheet.csv')
+// DATA_DIR: set to a persistent volume path in production (e.g. /data on Railway)
+// Falls back to parent dir locally so existing db.json keeps working
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..')
+const DB_PATH = path.join(DATA_DIR, 'db.json')
+const CSV_PATH = path.join(__dirname, 'master_dsa_sheet.csv')
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 function loadDB() {
@@ -1110,9 +1113,15 @@ Be specific. Name actual problems. Tell me exactly what to do next.`
   }
 })
 
-const PORT = 3001
+// Serve built frontend in production
+const DIST = path.join(__dirname, 'dist')
+if (fs.existsSync(DIST)) {
+  app.use(express.static(DIST))
+  app.get('*', (req, res) => res.sendFile(path.join(DIST, 'index.html')))
+}
+
+const PORT = process.env.PORT || 3001
 app.listen(PORT, () => {
   console.log(`DSA Tracker API running on http://localhost:${PORT}`)
-  // Pre-load DB on start
   getDB()
 })
