@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend
 } from 'recharts'
-import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink, FileBarChart, BrainCircuit, Zap, ListTodo } from 'lucide-react'
+import { CheckCircle, Flame, Clock, AlertTriangle, ArrowRight, ExternalLink, FileBarChart, BrainCircuit, Zap, ListTodo, CheckCheck } from 'lucide-react'
 import axios from 'axios'
 import ReportModal from './ReportModal.jsx'
 
@@ -191,7 +191,7 @@ export default function Dashboard() {
       )}
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <KPICard
           label="Total Solved"
           value={loading ? '—' : `${data?.solved} / ${data?.total}`}
@@ -222,6 +222,14 @@ export default function Dashboard() {
           sub="Topics below 40%"
           icon={AlertTriangle}
           color="bg-amber-900/50 text-amber-400"
+          loading={loading}
+        />
+        <KPICard
+          label="Solved Today"
+          value={loading ? '—' : data?.solvedTodayCount ?? 0}
+          sub="Problems done today"
+          icon={CheckCheck}
+          color="bg-green-900/50 text-green-400"
           loading={loading}
         />
       </div>
@@ -372,6 +380,46 @@ export default function Dashboard() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Problems Solved Today */}
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+        <h2 className="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
+          <CheckCheck size={15} className="text-green-400" />
+          Problems Solved Today
+          {!loading && data?.solvedTodayCount > 0 && (
+            <span className="ml-1 text-xs font-normal text-gray-500">({data.solvedTodayCount})</span>
+          )}
+        </h2>
+        {loading ? (
+          <div className="space-y-2">{[...Array(3)].map((_, i) => <div key={i} className="skeleton h-10 rounded-lg" />)}</div>
+        ) : !data?.solvedToday?.length ? (
+          <div className="text-center py-6">
+            <p className="text-gray-600 text-sm">Nothing solved yet today — go get one!</p>
+          </div>
+        ) : (
+          <div className="space-y-1 max-h-72 overflow-y-auto">
+            {data.solvedToday.map((p, i) => (
+              <div key={p.id} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-gray-800/50 group">
+                <span className="text-xs text-gray-600 w-4 text-right shrink-0">{i + 1}</span>
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0
+                  ${p.difficulty === 'Easy' ? 'bg-green-400' :
+                    p.difficulty === 'Medium' ? 'bg-amber-400' : 'bg-red-400'}`}
+                />
+                <a
+                  href={p.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 text-sm text-gray-300 hover:text-white truncate"
+                >
+                  {p.name}
+                </a>
+                <span className="text-xs text-gray-600 shrink-0">{p.topic}</span>
+                <ExternalLink size={12} className="text-gray-600 opacity-0 group-hover:opacity-100 shrink-0" />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {showReport && <ReportModal onClose={() => setShowReport(false)} />}

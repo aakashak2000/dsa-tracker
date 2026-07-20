@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
-  Search, ChevronDown, ExternalLink, FileText, CheckCircle2,
-  Circle, AlertCircle, Clock, SlidersHorizontal, X
+  Search, ChevronDown, ChevronUp, ChevronsUpDown, ExternalLink, FileText, CheckCircle2,
+  Circle, AlertCircle, Clock, X
 } from 'lucide-react'
 import axios from 'axios'
 import { formatDueDate } from '../utils/sm2.js'
@@ -12,13 +12,6 @@ import { useToast } from './ToastProvider.jsx'
 
 const DIFFICULTIES = ['Easy', 'Medium', 'Hard']
 const STATUSES = ['unseen', 'attempted', 'solved', 'due']
-const SORT_OPTIONS = [
-  { value: 'default', label: 'Default' },
-  { value: 'diff_asc', label: 'Difficulty ↑' },
-  { value: 'diff_desc', label: 'Difficulty ↓' },
-  { value: 'due_date', label: 'Due Date' },
-  { value: 'last_attempted', label: 'Last Attempted' }
-]
 
 const diffOrder = { Easy: 0, Medium: 1, Hard: 2 }
 
@@ -113,6 +106,24 @@ function ToggleChip({ label, active, onClick, color }) {
   )
 }
 
+function SortableHeader({ col, label, sortCol, sortDir, onSort, className = '' }) {
+  const active = sortCol === col
+  return (
+    <th
+      onClick={() => onSort(col)}
+      className={`px-3 py-3 text-left text-xs font-medium uppercase cursor-pointer select-none transition-colors
+        ${active ? 'text-white' : 'text-gray-500 hover:text-gray-300'} ${className}`}
+    >
+      <span className="flex items-center gap-1">
+        {label}
+        {active
+          ? sortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+          : <ChevronsUpDown size={12} className="opacity-30" />}
+      </span>
+    </th>
+  )
+}
+
 export default function ProblemSheet() {
   const toast = useToast()
   const [problems, setProblems] = useState([])
@@ -123,7 +134,8 @@ export default function ProblemSheet() {
   const [diffFilter, setDiffFilter] = useState([])
   const [statusFilter, setStatusFilter] = useState([])
   const [sourceFilter, setSourceFilter] = useState(null) // null, 'Striver', 'Added'
-  const [sortBy, setSortBy] = useState('default')
+  const [sortCol, setSortCol] = useState(null) // 'topic' | 'difficulty' | 'due' | 'last'
+  const [sortDir, setSortDir] = useState('asc')
   const [modalProblem, setModalProblem] = useState(null)
   const [noteProblem, setNoteProblem] = useState(null)
 
@@ -177,23 +189,33 @@ export default function ProblemSheet() {
     if (sourceFilter === 'Striver') list = list.filter(p => p.source === 'Striver')
     if (sourceFilter === 'Added') list = list.filter(p => p.source.startsWith('Added'))
 
-    switch (sortBy) {
-      case 'diff_asc': list.sort((a, b) => diffOrder[a.difficulty] - diffOrder[b.difficulty]); break
-      case 'diff_desc': list.sort((a, b) => diffOrder[b.difficulty] - diffOrder[a.difficulty]); break
-      case 'due_date': list.sort((a, b) => {
-        if (!a.nextReviewDate) return 1
-        if (!b.nextReviewDate) return -1
-        return a.nextReviewDate.localeCompare(b.nextReviewDate)
-      }); break
-      case 'last_attempted': list.sort((a, b) => {
-        const la = a.attempts.at(-1)?.date || ''
-        const lb = b.attempts.at(-1)?.date || ''
-        return lb.localeCompare(la)
-      }); break
+    if (sortCol) {
+      const dir = sortDir === 'asc' ? 1 : -1
+      list.sort((a, b) => {
+        if (sortCol === 'topic') return dir * a.topic.localeCompare(b.topic)
+        if (sortCol === 'difficulty') return dir * (diffOrder[a.difficulty] - diffOrder[b.difficulty])
+        if (sortCol === 'due') {
+          if (!a.nextReviewDate && !b.nextReviewDate) return 0
+          if (!a.nextReviewDate) return dir
+          if (!b.nextReviewDate) return -dir
+          return dir * a.nextReviewDate.localeCompare(b.nextReviewDate)
+        }
+        if (sortCol === 'last') {
+          const la = a.attempts.at(-1)?.date || ''
+          const lb = b.attempts.at(-1)?.date || ''
+          return dir * la.localeCompare(lb)
+        }
+        return 0
+      })
     }
 
     return list
-  }, [problems, search, topicFilter, subTopicFilter, diffFilter, statusFilter, sourceFilter, sortBy, todayStr])
+  }, [problems, search, topicFilter, subTopicFilter, diffFilter, statusFilter, sourceFilter, sortCol, sortDir, todayStr])
+
+  const handleColSort = (col) => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortCol(col); setSortDir('asc') }
+  }
 
   const handleLogAttempt = async (problem, data) => {
     try {
@@ -313,17 +335,14 @@ export default function ProblemSheet() {
             ))}
           </div>
 
-          {/* Sort */}
-          <div className="flex items-center gap-1.5">
-            <SlidersHorizontal size={14} className="text-gray-500" />
-            <select
-              value={sortBy}
-              onChange={e => setSortBy(e.target.value)}
-              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-300 focus:outline-none"
+          {sortCol && (
+            <button
+              onClick={() => { setSortCol(null); setSortDir('asc') }}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 px-2 py-1 rounded-lg border border-gray-700 hover:border-gray-600"
             >
-              {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
+              <X size={11} /> Clear sort
+            </button>
+          )}
         </div>
       </div>
 
@@ -335,11 +354,11 @@ export default function ProblemSheet() {
               <th className="w-10 px-4 py-3 text-left" />
               <th className="w-12 px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
               <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Problem</th>
-              <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Topic</th>
-              <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Difficulty</th>
+              <SortableHeader col="topic"      label="Topic"      sortCol={sortCol} sortDir={sortDir} onSort={handleColSort} />
+              <SortableHeader col="difficulty" label="Difficulty" sortCol={sortCol} sortDir={sortDir} onSort={handleColSort} />
               <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-              <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due</th>
-              <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last</th>
+              <SortableHeader col="due"        label="Due"        sortCol={sortCol} sortDir={sortDir} onSort={handleColSort} />
+              <SortableHeader col="last"       label="Last"       sortCol={sortCol} sortDir={sortDir} onSort={handleColSort} />
               <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
             </tr>
           </thead>

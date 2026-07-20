@@ -266,6 +266,23 @@ app.get('/api/dashboard', (req, res) => {
 
   const weakTopics = topicStats.filter(t => t.pct < 40).length
 
+  // Problems solved today (latest first — by attempt array position)
+  const solvedTodayList = []
+  problems.forEach(p => {
+    const todayAttempts = p.attempts
+      .map((a, i) => ({ ...a, i }))
+      .filter(a => a.date === todayStr && (a.status === 'solved' || (a.rating && a.rating >= 3)))
+    if (todayAttempts.length > 0) {
+      solvedTodayList.push({
+        id: p.id, name: p.name, topic: p.topic,
+        difficulty: p.difficulty, link: p.link,
+        _order: todayAttempts.at(-1).i
+      })
+    }
+  })
+  solvedTodayList.sort((a, b) => b._order - a._order)
+  const solvedToday = solvedTodayList.map(({ _order, ...p }) => p)
+
   // Activity log for heatmap
   const activityLog = db.user.activityLog || {}
 
@@ -309,7 +326,9 @@ app.get('/api/dashboard', (req, res) => {
     levelInfo,
     currentStreak: currentStreak || 0,
     longestStreak: longestStreak || 0,
-    badges: badges || []
+    badges: badges || [],
+    solvedToday,
+    solvedTodayCount: solvedToday.length
   })
 })
 
