@@ -556,31 +556,41 @@ app.post('/api/analyze-code', async (req, res) => {
   const problem = db.problems.find(p => p.id === problemId)
   if (!problem) return res.status(404).json({ error: 'Problem not found' })
 
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) return res.status(503).json({ error: 'No API key configured' })
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+  const openaiKey = process.env.OPENAI_API_KEY
+  if (!anthropicKey && !openaiKey) return res.status(503).json({ error: 'No API key configured' })
 
   const submissionsText = filled
     .map((code, i) => `--- Attempt ${i + 1} ---\n${code}`)
     .join('\n\n')
 
-  try {
-    const client = new Anthropic({ apiKey })
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 200,
-      messages: [{
-        role: 'user',
-        content: `Problem: "${problem.name}" (${problem.difficulty}, sub-topic: ${problem.subTopic})
+  const prompt = `Problem: "${problem.name}" (${problem.difficulty}, sub-topic: ${problem.subTopic})
 
 User's code submissions in order:
 
 ${submissionsText}
 
 In 2-3 sentences, identify: (1) the specific recurring mistake or conceptual gap visible across these attempts, (2) what it reveals about the user's understanding. Be concrete and code-specific. Do NOT explain the correct solution. Focus on the pattern of error, not just the final bug.`
-      }]
-    })
 
-    const insight = response.content[0].text.trim()
+  try {
+    let insight
+    if (anthropicKey) {
+      const client = new Anthropic({ apiKey: anthropicKey })
+      const response = await client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }]
+      })
+      insight = response.content[0].text.trim()
+    } else {
+      const client = new OpenAI({ apiKey: openaiKey })
+      const response = await client.chat.completions.create({
+        model: 'gpt-4o',
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }]
+      })
+      insight = response.choices[0].message.content.trim()
+    }
 
     if (!problem.codeInsights) problem.codeInsights = []
     problem.codeInsights.push({
