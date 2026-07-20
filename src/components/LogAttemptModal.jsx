@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import { X, ExternalLink, Clock, Lightbulb, AlertTriangle } from 'lucide-react'
+import { X, ExternalLink, Clock, Lightbulb, AlertTriangle, Code2, Plus, Trash2, ChevronDown, Sparkles } from 'lucide-react'
+import axios from 'axios'
 import { startTimer, getElapsedMinutes, clearTimer, expectedMinutes } from '../utils/timer.js'
 
 const RATING_CONFIG = [
@@ -26,6 +27,8 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
   const [failureTag, setFailureTag] = useState(null)
   const [timerWarning, setTimerWarning] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [showCode, setShowCode] = useState(false)
+  const [codeSubmissions, setCodeSubmissions] = useState([''])
 
   // Prefill from timer (started when "Open Problem" was clicked)
   useEffect(() => {
@@ -52,6 +55,11 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
         noteEntry,
         failureTag: rating <= 2 ? failureTag : null
       })
+      // Fire code analysis in background — don't await, don't block close
+      const filled = codeSubmissions.filter(s => s.trim().length > 0)
+      if (filled.length > 0) {
+        axios.post('/api/analyze-code', { problemId: problem.id, submissions: filled }).catch(() => {})
+      }
       clearTimer()
       onClose()
     } finally {
@@ -202,7 +210,7 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
             </div>
           )}
 
-          {/* Notes */}
+            {/* Notes */}
           <div>
             <label className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 block">
               Notes (optional)
@@ -214,6 +222,60 @@ export default function LogAttemptModal({ problem, onClose, onSubmit }) {
               rows={3}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500 resize-none"
             />
+          </div>
+
+          {/* Code submissions — optional, feeds AI analysis */}
+          <div className="border border-gray-800 rounded-xl overflow-hidden">
+            <button
+              onClick={() => setShowCode(s => !s)}
+              className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-800/40 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <Code2 size={13} className="text-brand-400" />
+                <span className="text-xs font-medium text-gray-400">Paste code submissions</span>
+                <span className="text-[10px] text-gray-600">(optional — AI diagnoses your mistake pattern)</span>
+              </div>
+              <ChevronDown size={13} className={`text-gray-600 transition-transform ${showCode ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showCode && (
+              <div className="px-4 pb-4 space-y-3 border-t border-gray-800 pt-3">
+                <div className="flex items-start gap-1.5 px-2.5 py-2 bg-brand-900/20 border border-brand-800/30 rounded-lg">
+                  <Sparkles size={11} className="text-brand-400 mt-0.5 shrink-0" />
+                  <p className="text-[11px] text-brand-300/80">Paste each attempt separately. AI will identify the mistake pattern from your progression and feed it into the detailed report — not stored as raw code.</p>
+                </div>
+                {codeSubmissions.map((code, i) => (
+                  <div key={i} className="relative">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] text-gray-600">Attempt {i + 1}</span>
+                      {codeSubmissions.length > 1 && (
+                        <button
+                          onClick={() => setCodeSubmissions(prev => prev.filter((_, j) => j !== i))}
+                          className="text-gray-600 hover:text-red-400"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      )}
+                    </div>
+                    <textarea
+                      value={code}
+                      onChange={e => setCodeSubmissions(prev => prev.map((s, j) => j === i ? e.target.value : s))}
+                      placeholder="Paste your code here…"
+                      rows={5}
+                      className="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-700 focus:outline-none focus:border-brand-500 resize-none font-mono"
+                    />
+                  </div>
+                ))}
+                {codeSubmissions.length < 5 && (
+                  <button
+                    onClick={() => setCodeSubmissions(prev => [...prev, ''])}
+                    className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 px-2 py-1.5 rounded-lg border border-gray-700 hover:border-gray-600 transition-colors"
+                  >
+                    <Plus size={12} /> Add another attempt
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

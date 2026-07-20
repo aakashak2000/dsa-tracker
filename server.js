@@ -546,6 +546,60 @@ app.get('/api/mock-interview', (req, res) => {
   res.json(session)
 })
 
+// POST /api/analyze-code — extract compact insight from code submissions
+app.post('/api/analyze-code', async (req, res) => {
+  const { problemId, submissions } = req.body
+  const filled = (submissions || []).filter(s => s.trim().length > 0)
+  if (!filled.length) return res.status(400).json({ error: 'No code submitted' })
+
+  const db = getDB()
+  const problem = db.problems.find(p => p.id === problemId)
+  if (!problem) return res.status(404).json({ error: 'Problem not found' })
+
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) return res.status(503).json({ error: 'No API key configured' })
+
+  const submissionsText = filled
+    .map((code, i) => `--- Attempt ${i + 1} ---\n${code}`)
+    .join('\n\n')
+
+  try {
+    const client = new Anthropic({ apiKey })
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 200,
+      messages: [{
+        role: 'user',
+        content: `Problem: "${problem.name}" (${problem.difficulty}, sub-topic: ${problem.subTopic})
+
+User's code submissions in order:
+
+${submissionsText}
+
+In 2-3 sentences, identify: (1) the specific recurring mistake or conceptual gap visible across these attempts, (2) what it reveals about the user's understanding. Be concrete and code-specific. Do NOT explain the correct solution. Focus on the pattern of error, not just the final bug.`
+      }]
+    })
+
+    const insight = response.content[0].text.trim()
+
+    if (!problem.codeInsights) problem.codeInsights = []
+    problem.codeInsights.push({
+      date: today(),
+      insight,
+      difficulty: problem.difficulty,
+      subTopic: problem.subTopic,
+      attemptCount: filled.length
+    })
+    if (problem.codeInsights.length > 5) problem.codeInsights = problem.codeInsights.slice(-5)
+
+    saveDB(db)
+    res.json({ insight })
+  } catch (err) {
+    console.error('Code analysis error:', err)
+    res.status(500).json({ error: 'Analysis failed' })
+  }
+})
+
 // POST /api/attempt
 app.post('/api/attempt', (req, res) => {
   const { problemId, status, rating, timeSpent, noteEntry, failureTag } = req.body
@@ -1008,55 +1062,98 @@ app.post('/api/detailed-report', async (req, res) => {
     const todayStr = today()
     const cutoff = new Date(Date.now() - 14 * 864e5).toISOString().split('T')[0]
 
-    // Build topic stats — filter to changed topics for incremental mode
-    const targetTopics = (mode === 'incremental' && topics?.length)
-      ? [...new Set(problems.map(p => p.topic))].filter(t => topics.includes(t))
-      : [...new Set(problems.map(p => p.topic))]
+    // Pattern gaps: sub-topic level, difficulty-weighted, Easy+solid stripped out
+    const cutoff14 = new Date(Date.now() - 14 * 864e5).toISOString().split('T')[0]
+    const subTopicMap = {}
 
-    const topicStats = targetTopics.map(topic => {
-      const tp = problems.filter(p => p.topic === topic)
-      const solved = tp.filter(p => p.status === 'solved').length
-      const attempted = tp.filter(p => p.repetitions > 0)
-      const avgEF = attempted.length
-        ? (attempted.reduce((s, p) => s + p.easeFactor, 0) / attempted.length).toFixed(2)
-        : null
-      return {
-        topic, total: tp.length, solved,
-        pct: Math.round((solved / tp.length) * 100),
-        avgEF, attempted: attempted.length,
-        subTopics: [...new Set(tp.map(p => p.subTopic))]
+    for (const p of problems) {
+      if (mode === 'incremental' && topics?.length && !topics.includes(p.topic)) continue
+      if (p.repetitions === 0) continue
+      if (p.difficulty === 'Easy' && p.easeFactor >= 2.4) continue // solid easy — skip
+
+      const key = p.subTopic
+      if (!subTopicMap[key]) {
+        subTopicMap[key] = {
+          subTopic: key, topic: p.topic,
+          medHardCount: 0, againWeighted: 0, lookedUp: 0,
+          efSum: 0, efCount: 0, recentProblems: [], failureTags: {}
+        }
       }
-    }).filter(t => t.attempted > 0 || t.solved > 0)
+      const st = subTopicMap[key]
+      const diffW = p.difficulty === 'Hard' ? 3 : p.difficulty === 'Medium' ? 2 : 1
+      if (p.difficulty !== 'Easy') st.medHardCount++
+      st.efSum += p.easeFactor
+      st.efCount++
 
-    const problemsWithNotes = problems
-      .filter(p => p.noteEntries?.length > 0 &&
-        (mode !== 'incremental' || !topics?.length || topics.includes(p.topic)))
-      .map(p => ({
-        name: p.name, topic: p.topic, subTopic: p.subTopic,
-        difficulty: p.difficulty, status: p.status, ef: p.easeFactor.toFixed(2),
-        notes: p.noteEntries.slice(-3).map(n => `[${n.date}] ${n.text}`).join(' | ')
+      for (const a of p.attempts) {
+        if (a.date < cutoff14) continue
+        if (a.rating === 1) st.againWeighted += diffW
+        else if (a.rating === 2) st.againWeighted += diffW * 0.5
+        if (a.failureTag === 'looked_up') st.lookedUp++
+        if (a.failureTag && a.failureTag !== 'looked_up') {
+          st.failureTags[a.failureTag] = (st.failureTags[a.failureTag] || 0) + 1
+        }
+      }
+
+      const hasRecentStruggle = p.attempts.some(a =>
+        a.date >= cutoff14 && (a.rating === 1 || a.rating === 2 || a.failureTag === 'looked_up'))
+      if (hasRecentStruggle || p.easeFactor < 2.2) {
+        st.recentProblems.push({
+          name: p.name, difficulty: p.difficulty, ef: p.easeFactor.toFixed(2)
+        })
+      }
+    }
+
+    const patternGaps = Object.values(subTopicMap)
+      .map(st => ({
+        subTopic: st.subTopic, topic: st.topic,
+        medHardCount: st.medHardCount,
+        avgEF: st.efCount ? +(st.efSum / st.efCount).toFixed(2) : 2.5,
+        struggleScore: +(st.againWeighted + st.lookedUp * 1.5).toFixed(1),
+        topFailureMode: Object.entries(st.failureTags).sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+        recentProblems: st.recentProblems.slice(0, 4)
       }))
+      .filter(st => st.struggleScore > 0 || st.avgEF < 2.2)
+      .sort((a, b) => b.struggleScore - a.struggleScore || a.avgEF - b.avgEF)
+      .slice(0, 8)
 
-    const recentStruggles = problems
-      .filter(p => p.attempts.some(a => a.date >= cutoff && (a.rating === 1 || a.rating === 2)) &&
+    // Code-level insights from last 30 days (richest signal)
+    const codeInsights = problems
+      .filter(p => p.codeInsights?.length &&
         (mode !== 'incremental' || !topics?.length || topics.includes(p.topic)))
-      .map(p => ({
-        name: p.name, topic: p.topic, ef: p.easeFactor.toFixed(2),
-        failureModes: [...new Set(p.attempts.filter(a => a.failureTag).map(a => a.failureTag))]
-      }))
+      .flatMap(p => p.codeInsights
+        .filter(ci => ci.date >= cutoff)
+        .map(ci => ({ problem: p.name, ...ci }))
+      )
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 12)
 
-    const overdue = problems.filter(p => p.nextReviewDate && p.nextReviewDate < todayStr).map(p => p.name)
+    // SM-2 priority: due now + shaky retention (EF < 2.4, non-trivial)
+    const smPriority = problems
+      .filter(p =>
+        p.nextReviewDate && p.nextReviewDate <= todayStr &&
+        p.easeFactor < 2.4 && p.repetitions > 0 &&
+        !(p.difficulty === 'Easy' && p.easeFactor >= 2.4))
+      .sort((a, b) => a.easeFactor - b.easeFactor)
+      .slice(0, 6)
+      .map(p => ({ name: p.name, topic: p.topic, difficulty: p.difficulty, ef: p.easeFactor.toFixed(2) }))
+
     const solved = problems.filter(p => p.status === 'solved').length
+    const thisWeekStart = new Date(Date.now() - 7 * 864e5).toISOString().split('T')[0]
+    const solvedThisWeek = problems.filter(p =>
+      p.attempts.some(a => a.status === 'solved' && a.date >= thisWeekStart)).length
 
     const contextData = {
       overview: {
         solved, total: problems.length,
         pct: Math.round((solved / problems.length) * 100),
         streak: db.user.currentStreak || 0,
-        level: levelFromXP(db.user.xp || 0).name
+        level: levelFromXP(db.user.xp || 0).name,
+        solvedThisWeek
       },
-      topicStats, problemsWithNotes, recentStruggles,
-      overdueCount: overdue.length, overdueNames: overdue.slice(0, 10)
+      patternGaps,
+      codeInsights: codeInsights.length ? codeInsights : undefined,
+      smPriority: smPriority.length ? smPriority : undefined
     }
 
     // Build history context block
@@ -1070,30 +1167,45 @@ app.post('/api/detailed-report', async (req, res) => {
       if (kept.length) historyBlock += `\nCurrently tracked by user (include/update these):\n${kept.map(h => `- [${h.section}] ${h.text}`).join('\n')}`
     }
 
-    const systemPrompt = `You are an expert DSA coach analyzing a student's practice journal. Give a brutally honest, specific, actionable improvement plan based on their progress data and notes.
+    const systemPrompt = `You are an expert DSA interview coach. Your job is to diagnose the student's REAL gaps from their practice data — not give generic advice.
 
-Output format (strict markdown):
-- ## heading per topic/section
-- Under each: 2-3 sentence diagnosis, then - [ ] checkbox todos
-- End with ## Priority This Week (top 5 todos across all sections)
-- Reference actual problem names and patterns from their notes
-- Tone: direct, like a senior engineer doing a code review`
+RULES — violating these makes the report useless:
+1. NEVER suggest reviewing Easy problems with EF >= 2.4. Those are solid. Mentioning "print 1 to N" or similar trivia is a failure.
+2. Focus ONLY on Medium and Hard problem patterns. That's where interview performance is decided.
+3. EF < 2.0 = critical gap. EF 2.0-2.3 = shaky. EF > 2.5 = solid, skip it.
+4. Solving once ≠ mastered. SM-2 smPriority shows what retention is actually at risk RIGHT NOW — treat this as urgent.
+5. codeInsights are the richest signal available — they show the exact mistake pattern from real code. Prioritise them above everything else.
+6. struggleScore is difficulty-weighted: a Hard "Again" counts 3x an Easy one. High score = real problem.
+7. Goal: student reliably solves Medium/Hard problems in under 20 min.`
 
     const userPrompt = mode === 'incremental'
-      ? `Update ONLY the sections for these changed topics: ${topics?.join(', ')}.
-Use ## headings matching the topic names. Same format as a full report (diagnosis + - [ ] todos).
+      ? `Update ONLY sections for these changed patterns/topics: ${topics?.join(', ')}.
 ${historyBlock}
 
 Updated data:
 ${JSON.stringify(contextData, null, 2)}
 
-Be specific. Name actual problems.`
-      : `Generate a detailed section-by-section action plan with specific todos based on my DSA practice data and notes.
+Format: ## Pattern Gap heading, 2-sentence diagnosis citing specific problems and EF scores, then 2-3 - [ ] todos. No Easy problem suggestions.`
+      : `Analyze my DSA practice data and give me a focused, honest diagnosis.
 ${historyBlock}
 
 ${JSON.stringify(contextData, null, 2)}
 
-Be specific. Name actual problems. Tell me exactly what to do next.`
+Output (strict markdown):
+
+## The Real Gaps
+For each of the top 2-3 pattern gaps: name the conceptual issue → cite specific problems and EF scores from patternGaps → if codeInsights exist for this pattern, quote what the code revealed → give 2 specific Medium/Hard problems to drill next
+
+## Do These First (Retention Risk)
+Use smPriority — one line per problem explaining why it needs attention now based on EF
+
+## Skip These For Now
+What's actually solid. Be explicit so I don't waste time on it.
+
+## One Thing to Change This Week
+Single most impactful focus shift based on the patterns above.
+
+No padding. No generic advice. Name actual problems. Cite actual EF scores.`
 
     if (provider === 'openai') {
       const client = new OpenAI({ apiKey: openaiKey })
